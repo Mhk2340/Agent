@@ -1,0 +1,20 @@
+# Gradle build outputs and daemon cache
+.gradle/
+build/
+**/build/
+
+# IDE and OS
+.idea/
+*.iml
+.DS_Store
+
+# Temporary files and binaries
+*.hprof
+*.class
+*.apk
+*.aar
+/tmp/
+build/
+.gradle/
+.kotlin/
+local.properties

@@ -1,0 +1,8 @@
+{
+  "system_info": {
+    "domain": "system",
+    "description": "Reads non-sensitive system status",
+    "access_method": "skill",
+    "risk_level": 1
+  }
+}
