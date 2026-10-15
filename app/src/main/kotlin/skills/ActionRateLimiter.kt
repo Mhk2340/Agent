@@ -10,9 +10,14 @@ import java.util.concurrent.ConcurrentLinkedQueue
  */
 class ActionRateLimiter(
     // PROVISIONAL - pending GEN-PERF-1: default 5 Level-3 actions per hour
-    val maxLevel3ActionsPerHour: Int = 5,
-    private val clock: () -> Long = { System.currentTimeMillis() }
+    maxLevel3ActionsPerHour: Int = 5,
+    private val clock: () -> Long = { System.currentTimeMillis() },
+    private val configuredMaxLevel3ActionsPerHour: (() -> Int)? = null
 ) {
+    private val seedMaxLevel3ActionsPerHour = maxLevel3ActionsPerHour
+    val maxLevel3ActionsPerHour: Int
+        get() = (configuredMaxLevel3ActionsPerHour?.invoke() ?: seedMaxLevel3ActionsPerHour).coerceAtLeast(1)
+
     private val executionTimestamps = ConcurrentLinkedQueue<Long>()
 
     data class RateLimitCheck(
@@ -34,13 +39,14 @@ class ActionRateLimiter(
 
         pruneOldEntries()
         val currentCount = executionTimestamps.size
-        if (currentCount >= maxLevel3ActionsPerHour) {
+        val maxAllowed = maxLevel3ActionsPerHour
+        if (currentCount >= maxAllowed) {
             val oldest = executionTimestamps.peek() ?: clock()
             val resetTime = (oldest + 3600_000L) - clock()
             return RateLimitCheck(
                 allowed = false,
                 currentCountInWindow = currentCount,
-                maxAllowed = maxLevel3ActionsPerHour,
+                maxAllowed = maxAllowed,
                 resetInMs = resetTime.coerceAtLeast(0L)
             )
         }
@@ -49,7 +55,7 @@ class ActionRateLimiter(
         return RateLimitCheck(
             allowed = true,
             currentCountInWindow = executionTimestamps.size,
-            maxAllowed = maxLevel3ActionsPerHour,
+            maxAllowed = maxAllowed,
             resetInMs = 3600_000L
         )
     }

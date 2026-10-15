@@ -1,5 +1,7 @@
 package multiagent
 
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
 import contracts.InferenceError
 import contracts.InferenceProvider
 import contracts.InferenceRequest
@@ -7,91 +9,119 @@ import contracts.InferenceResponse
 import contracts.ProviderCapabilities
 import contracts.ProviderType
 import contracts.TokenUsage
-import memory.EncryptedMemoryStorage
-import memory.MemoryManager
+import memory.AesGcmCipher
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.After
 import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import persistence.AgentDatabase
+import testutil.RoomTestEnvironment
+import testutil.TestOnlyIntegrityMacKeyProvider
+import testutil.TestOnlyKeystoreKeyProvider
 import reliability.AgentOperatingModeManager
 import reliability.InMemorySliEventSink
 import reliability.InferenceRoutingTarget
 import reliability.OperatingMode
 import reliability.SliEvent
-import security.AppLockManager
-import security.InMemorySecurityEpochStore
 import security.KeystoreSecretManager
-import security.RealSecurityLockdownEnforcer
-import skills.ActionRateLimiter
 
+@RunWith(RobolectricTestRunner::class)
 class PhaseXviMultiAgentOrchestrationTest {
 
+    private lateinit var context: Context
+    private lateinit var testKeys: TestOnlyKeystoreKeyProvider
+    private lateinit var macKeyProvider: TestOnlyIntegrityMacKeyProvider
+    private lateinit var database: AgentDatabase
     private lateinit var secretManager: KeystoreSecretManager
     private lateinit var providerPool: ExternalAiProviderPoolImpl
-    private lateinit var workspaceManager: SharedWorkspaceManager
     private lateinit var sliEventSink: InMemorySliEventSink
     private lateinit var jobManager: AsyncJobManager
-    private lateinit var realPanicHooks: RealPanicResetPhaseXVIHooks
-    private lateinit var memoryStorage: EncryptedMemoryStorage
-    private lateinit var memoryManager: MemoryManager
-    private lateinit var rateLimiter: ActionRateLimiter
-    private lateinit var realSecurityEnforcer: RealSecurityLockdownEnforcer
+    private lateinit var container: runtime.di.AgentContainer
+    private lateinit var epochPreferencesName: String
+    private lateinit var epochIntegrityAlias: String
+    private lateinit var lockdownPreferencesName: String
+    private lateinit var lockdownIntegrityAlias: String
 
     @Before
     fun setup() {
-        secretManager = KeystoreSecretManager()
-        providerPool = ExternalAiProviderPoolImpl(secretManager)
-        workspaceManager = SharedWorkspaceManager()
+        context = ApplicationProvider.getApplicationContext()
+        testKeys = TestOnlyKeystoreKeyProvider()
+        macKeyProvider = TestOnlyIntegrityMacKeyProvider()
         sliEventSink = InMemorySliEventSink()
         jobManager = AsyncJobManager(sliEventSink = sliEventSink)
-        realPanicHooks = RealPanicResetPhaseXVIHooks(jobManager, workspaceManager)
 
-        memoryStorage = EncryptedMemoryStorage()
-        memoryManager = MemoryManager(storage = memoryStorage)
-        rateLimiter = ActionRateLimiter(maxLevel3ActionsPerHour = 5)
+        val memoryCipher = AesGcmCipher(testKeys, AesGcmCipher.DEFAULT_DATABASE_KEY_ALIAS)
+        database = RoomTestEnvironment.inMemoryDatabase(context, memoryCipher)
+        secretManager = KeystoreSecretManager(database = database, keyProvider = testKeys)
+        providerPool = ExternalAiProviderPoolImpl(secretManager)
 
-        realSecurityEnforcer = RealSecurityLockdownEnforcer(
-            memoryManager = memoryManager,
-            memoryStorage = memoryStorage,
-            secretManager = secretManager,
-            epochStore = InMemorySecurityEpochStore(),
-            rateLimiter = rateLimiter,
-            appLockManager = AppLockManager(),
-            phaseXVIHooks = realPanicHooks
+        val suffix = java.util.UUID.randomUUID().toString()
+        epochPreferencesName = "phase-xvi-security-epoch-$suffix"
+        epochIntegrityAlias = "phase-xvi-epoch-hmac-$suffix"
+        lockdownPreferencesName = "phase-xvi-panic-lock-$suffix"
+        lockdownIntegrityAlias = "phase-xvi-panic-lock-hmac-$suffix"
+        context.getSharedPreferences("agent_policy_config", Context.MODE_PRIVATE)
+            .edit().clear().commit()
+
+        container = runtime.di.AgentContainer(
+            applicationContext = context,
+            databaseOverride = database,
+            keystoreKeyProviderOverride = testKeys,
+            securityEpochStoreOverride = security.AndroidSecurityEpochStore(
+                context,
+                macKeyProvider,
+                epochPreferencesName,
+                epochIntegrityAlias
+            ),
+            panicResetLockdownStoreOverride = security.AndroidPanicResetLockdownStore(
+                context,
+                macKeyProvider,
+                lockdownPreferencesName,
+                lockdownIntegrityAlias
+            ),
+            benchmarkWorkCancellerOverride = inference.PanicResetBenchmarkWorkCanceller { }
         )
     }
 
-    // 1. Integration: Panic Reset calls REAL AsyncJobManager and SharedWorkspaceManager
+    @After
+    fun tearDown() {
+        database.close()
+        testKeys.clearAllKeysForTest()
+        macKeyProvider.clearForTest()
+        context.getSharedPreferences(epochPreferencesName, Context.MODE_PRIVATE).edit().clear().commit()
+        context.getSharedPreferences(lockdownPreferencesName, Context.MODE_PRIVATE).edit().clear().commit()
+        context.getSharedPreferences("agent_policy_config", Context.MODE_PRIVATE).edit().clear().commit()
+    }
+
+    // 1. Integration: production AgentContainer cancels real jobs and purges its workspace.
     @Test
     fun testPanicResetInvokesRealPhaseXVIJobAndWorkspacePurge() {
-        // Enqueue active jobs
-        val job1 = jobManager.submitJob("job-01", "Create Video Script", "A short sci-fi video")
-        val job2 = jobManager.submitJob("job-02", "Generate Song", "Upbeat pop track")
-        jobManager.startNextJob() // job1 is now RUNNING
+        assertTrue(container.panicResetPhaseXVIHooks is RealPanicResetPhaseXVIHooks)
+        val containerJobs = container.asyncJobManager
+        val workspace = container.sharedWorkspaceManager
+        val job1 = containerJobs.submitJob("job-01", "Create Video Script", "A short sci-fi video")
+        val job2 = containerJobs.submitJob("job-02", "Generate Song", "Upbeat pop track")
+        containerJobs.startNextJob()
 
         assertEquals(JobStatus.RUNNING, job1.status)
         assertEquals(JobStatus.QUEUED, job2.status)
 
-        // Store artifacts in shared workspace
-        workspaceManager.saveRoleOutput("job-01", "Writer", "Scene 1: Space station docking")
-        workspaceManager.saveRoleOutput("job-01", "Director", "Camera panning wide angle")
+        workspace.saveRoleOutput("job-01", "Writer", "Scene 1: Space station docking")
+        workspace.saveRoleOutput("job-01", "Director", "Camera panning wide angle")
+        assertEquals(2, workspace.getArtifactsForJob("job-01").size)
 
-        assertEquals(2, workspaceManager.getArtifactsForJob("job-01").size)
-
-        // Trigger Panic Reset
-        val newEpoch = realSecurityEnforcer.executePanicReset("Stolen device alert")
+        val newEpoch = container.executePanicReset("Stolen device alert")
         assertEquals(2L, newEpoch)
-
-        // Verify Real AsyncJobManager cancelled all active jobs
         assertEquals(JobStatus.CANCELLED, job1.status)
         assertEquals(JobStatus.CANCELLED, job2.status)
         assertTrue(job1.cancellationReason!!.contains("Panic Reset"))
-
-        // Verify Real SharedWorkspaceManager purged all workspace data
-        assertTrue(workspaceManager.getArtifactsForJob("job-01").isEmpty())
+        assertTrue(workspace.getArtifactsForJob("job-01").isEmpty())
     }
 
     // 2. Integration: External AI Provider Pool connects to GEN-MODE-1/THERMAL

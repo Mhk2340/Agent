@@ -1,5 +1,8 @@
 package skills
 
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
+import memory.AesGcmCipher
 import memory.EncryptedMemoryStorage
 import memory.MemoryCallerRole
 import memory.MemoryManager
@@ -8,8 +11,14 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.After
 import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import persistence.AgentDatabase
+import testutil.RoomTestEnvironment
+import testutil.TestUnlockedAppLockAccess
 import safety.RiskLevel
 import safety.SafetyGuard
 import safety.SkillContract
@@ -24,8 +33,11 @@ import safety.SkillContract
  * - GEN-NEW-AUDIT: Action Audit Log & Projection to Contract #4 (Experience Record v1.1)
  * - GEN-353/354: Idempotency Key Reservation Pattern
  */
+@RunWith(RobolectricTestRunner::class)
 class PhaseIXExecutionSecurityTest {
 
+    private lateinit var database: AgentDatabase
+    private lateinit var testCipher: AesGcmCipher
     private lateinit var safetyGuard: SafetyGuard
     private lateinit var memoryManager: MemoryManager
     private lateinit var auditLog: ActionAuditLog
@@ -37,9 +49,15 @@ class PhaseIXExecutionSecurityTest {
 
     @Before
     fun setup() {
+        testCipher = RoomTestEnvironment.newCipher()
+        database = RoomTestEnvironment.inMemoryDatabase(
+            ApplicationProvider.getApplicationContext<Context>(),
+            testCipher
+        )
         safetyGuard = SafetyGuard()
-        memoryManager = MemoryManager(storage = EncryptedMemoryStorage())
-        auditLog = ActionAuditLog(memoryManager)
+        val storage = EncryptedMemoryStorage(database, testCipher)
+        memoryManager = MemoryManager(storage = storage, appLockAccess = TestUnlockedAppLockAccess)
+        auditLog = ActionAuditLog(memoryManager, database, testCipher)
         simulator = ActionSimulator(safetyGuard)
         promptGenerator = ConfirmationPromptGenerator()
         rateLimiter = ActionRateLimiter(maxLevel3ActionsPerHour = 3)
@@ -47,6 +65,7 @@ class PhaseIXExecutionSecurityTest {
         engine = SkillExecutionEngine(
             safetyGuard = safetyGuard,
             auditLog = auditLog,
+            appLockAccess = TestUnlockedAppLockAccess,
             simulator = simulator,
             promptGenerator = promptGenerator,
             rateLimiter = rateLimiter
@@ -83,6 +102,11 @@ class PhaseIXExecutionSecurityTest {
         engine.registerHandler("read_calendar") { "Event: Team sync at 10 AM" }
         engine.registerHandler("create_note") { params -> "Note created: ${params["title"]}" }
         engine.registerHandler("send_sms") { params -> "SMS delivered to ${params["recipient"]}" }
+    }
+
+    @After
+    fun tearDown() {
+        database.close()
     }
 
     // 1. GEN-327 Skill Selector
@@ -242,6 +266,11 @@ class PhaseIXExecutionSecurityTest {
         val res2 = engine.executeSkill(req.copy(actionId = "sms-idemp-retry"))
         assertEquals(ExecutionStatus.IDEMPOTENT_SKIPPED, res2.status)
         assertEquals("SMS delivered to Charlie", res2.output)
+
+        val idempotencyEvents = auditLog.getAllRecords().filter { it.idempotencyKey == req.idempotencyKey }
+        assertEquals("Reservation and final outcome are separate append-only events", 2, idempotencyEvents.size)
+        assertTrue(idempotencyEvents.any { it.executionStatus == "IN_FLIGHT" })
+        assertTrue(idempotencyEvents.any { it.executionStatus == "SUCCEEDED" })
     }
 
     // 8. GEN-NEW-AUDIT & Contract #4 Projection Test

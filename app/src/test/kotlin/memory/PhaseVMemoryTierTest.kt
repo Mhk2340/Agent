@@ -1,11 +1,22 @@
 package memory
 
+import android.content.ContentValues
+import android.database.sqlite.SQLiteDatabase
+import androidx.test.core.app.ApplicationProvider
+import android.content.Context
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.After
 import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import persistence.FloatVectorCodec
+import testutil.RoomTestEnvironment
+import testutil.TestUnlockedAppLockAccess
+import java.util.UUID
 
 /**
  * Phase V Tier 1 Test Suite:
@@ -16,19 +27,28 @@ import org.junit.Test
  * - Canonical Schema v1.2: retry_after, schema_version
  * - Safe Migration Pattern Verification (Rename -> Create -> Insert -> Drop + Checkpoint)
  */
+@RunWith(RobolectricTestRunner::class)
 class PhaseVMemoryTierTest {
 
     private lateinit var memoryManager: MemoryManager
     private lateinit var cipher: AesGcmCipher
     private lateinit var storage: EncryptedMemoryStorage
+    private lateinit var database: persistence.AgentDatabase
     private var currentTime: Long = 1000000L
 
     @Before
     fun setup() {
         currentTime = 1000000L
-        cipher = AesGcmCipher()
-        storage = EncryptedMemoryStorage(cipher = cipher)
-        memoryManager = MemoryManager(storage = storage, clock = { currentTime })
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        cipher = RoomTestEnvironment.newCipher()
+        database = RoomTestEnvironment.inMemoryDatabase(context, cipher)
+        storage = EncryptedMemoryStorage(database = database, cipher = cipher)
+        memoryManager = MemoryManager(storage = storage, appLockAccess = TestUnlockedAppLockAccess, clock = { currentTime })
+    }
+
+    @After
+    fun tearDown() {
+        database.close()
     }
 
     // 1. GEN-MEM-6 AES-256 Encryption At-Rest Test
@@ -104,6 +124,9 @@ class PhaseVMemoryTierTest {
         val fetched = memoryManager.getById(entry.id, MemoryCallerRole.SYSTEM_CORE)
         assertNotNull(fetched)
         assertEquals("External API rate limited", fetched!!.content)
+        val storedRow = database.longTermMemoryDao().getById(entry.id)!!
+        assertFalse(storedRow.content.contains("External API rate limited"))
+        assertEquals("External API rate limited", cipher.decrypt(storedRow.content))
         assertEquals(MemoryType.FAILURE, fetched.memoryType)
         assertEquals(60000L, fetched.retryAfter)
         assertEquals(1, fetched.schemaVersion)
@@ -155,7 +178,7 @@ class PhaseVMemoryTierTest {
     // 6. Memory Storage Ceiling Rejection (PROVISIONAL - 20,000 ceiling)
     @Test
     fun testMemoryCeilingRejection() {
-        val boundedManager = MemoryManager(storage = storage, maxRecordCeiling = 2)
+        val boundedManager = MemoryManager(storage = storage, appLockAccess = TestUnlockedAppLockAccess, maxRecordCeiling = 2)
         boundedManager.saveLongTermMemory(MemoryType.EPISODIC, "m1", null, callerRole = MemoryCallerRole.SYSTEM_CORE)
         boundedManager.saveLongTermMemory(MemoryType.EPISODIC, "m2", null, callerRole = MemoryCallerRole.SYSTEM_CORE)
 
@@ -167,39 +190,92 @@ class PhaseVMemoryTierTest {
         }
     }
 
-    // 7. Safe Migration Pattern: Rename -> Create -> Insert -> Drop + RowCount Checkpoint
+    // 7. Real SQLite/Room Migration: Rename -> Create -> Insert -> Drop + RowCount Checkpoint
     @Test
     fun testSafeDatabaseMigrationPattern() {
-        // Populate initial v1 entries
-        memoryManager.saveLongTermMemory(
-            memoryType = MemoryType.SEMANTIC,
-            content = "Fact A",
-            embedding = listOf(0.1f),
-            schemaVersion = 1,
-            callerRole = MemoryCallerRole.SYSTEM_CORE
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val databaseName = "legacy-memory-${UUID.randomUUID()}.db"
+        val path = context.getDatabasePath(databaseName)
+        path.parentFile?.mkdirs()
+        val legacy = SQLiteDatabase.openOrCreateDatabase(path, null)
+        legacy.execSQL(
+            """CREATE TABLE `long_term_memory` (
+                `id` TEXT NOT NULL PRIMARY KEY,
+                `memory_type` TEXT NOT NULL,
+                `content` TEXT NOT NULL,
+                `embedding` BLOB,
+                `importance` REAL NOT NULL,
+                `created_at` INTEGER NOT NULL,
+                `last_accessed_at` INTEGER NOT NULL,
+                `access_count` INTEGER NOT NULL
+            )""".trimIndent()
         )
-        memoryManager.saveLongTermMemory(
-            memoryType = MemoryType.FAILURE,
-            content = "Failure B",
-            embedding = listOf(0.2f),
-            retryAfter = 5000L,
-            schemaVersion = 1,
-            callerRole = MemoryCallerRole.SYSTEM_CORE
-        )
+        val factEmbedding = FloatVectorCodec.encode(listOf(0.1f, 0.2f))
+        val failureEmbedding = FloatVectorCodec.encode(listOf(0.3f, 0.4f))
+        val fact = ContentValues().apply {
+            put("id", "legacy-fact")
+            put("memory_type", "semantic")
+            put("content", cipher.encrypt("Fact A"))
+            put("embedding", factEmbedding)
+            put("importance", 0.8)
+            put("created_at", 1_000L)
+            put("last_accessed_at", 900L)
+            put("access_count", 2)
+        }
+        val failure = ContentValues().apply {
+            put("id", "legacy-failure")
+            put("memory_type", "failure")
+            put("content", cipher.encrypt("Failure B"))
+            put("embedding", failureEmbedding)
+            put("importance", 0.9)
+            put("created_at", 2_000L)
+            put("last_accessed_at", 1_900L)
+            put("access_count", 3)
+        }
+        assertTrue(legacy.insertOrThrow("long_term_memory", null, fact) > 0L)
+        assertTrue(legacy.insertOrThrow("long_term_memory", null, failure) > 0L)
+        legacy.version = 1
+        legacy.close()
 
-        assertEquals(2, memoryManager.getTotalCount(MemoryCallerRole.SYSTEM_CORE))
+        val rowsBefore = SQLiteDatabase.openDatabase(
+            path.absolutePath,
+            null,
+            SQLiteDatabase.OPEN_READONLY
+        ).use { database ->
+            database.rawQuery("SELECT COUNT(*) FROM `long_term_memory`", null).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                cursor.getLong(0)
+            }
+        }
+        assertEquals(2L, rowsBefore)
 
-        // Execute safe migration from v1 to v2
-        val report = memoryManager.executeDatabaseMigration(targetVersion = 2, callerRole = MemoryCallerRole.SYSTEM_CORE)
+        val migratedDatabase = RoomTestEnvironment.fileDatabase(context, databaseName, cipher)
+        try {
+            val migratedStorage = EncryptedMemoryStorage(migratedDatabase, cipher)
+            val allEntries = migratedStorage.getAllActiveEntries()
+            assertEquals(2, allEntries.size)
+            assertEquals("Fact A", migratedStorage.getById("legacy-fact")!!.content)
+            assertEquals("Failure B", migratedStorage.getById("legacy-failure")!!.content)
+            assertEquals(listOf(0.1f, 0.2f), migratedStorage.getById("legacy-fact")!!.embedding)
+            assertEquals(1, migratedStorage.getById("legacy-fact")!!.schemaVersion)
+            assertEquals(0L, migratedStorage.getById("legacy-fact")!!.lastRetrievedAt)
+            assertEquals(0L, migratedStorage.getById("legacy-fact")!!.lastUsedAt)
+            assertEquals(0, migratedStorage.getById("legacy-fact")!!.successfulUseCount)
+            assertEquals(null, migratedStorage.getById("legacy-failure")!!.retryAfter)
+            assertEquals(3, migratedDatabase.openHelper.readableDatabase.version)
+            assertTrue(migratedDatabase.providerSecretDao().getProviderIds().isEmpty())
 
-        assertTrue(report.success)
-        assertEquals(2, report.migratedRows)
-        assertEquals(2, report.targetVersion)
-
-        // Verify entries retain their contents and reflect updated schemaVersion
-        val allEntries = storage.getAllActiveEntries()
-        assertEquals(2, allEntries.size)
-        assertTrue(allEntries.all { it.schemaVersion == 2 })
+            val rowsAfter = migratedDatabase.longTermMemoryDao().count().toLong()
+            assertEquals("Migration row_count checkpoint must match", rowsBefore, rowsAfter)
+            assertFalse(
+                migratedDatabase.openHelper.readableDatabase.query(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='long_term_memory_old'"
+                ).use { it.moveToFirst() }
+            )
+        } finally {
+            migratedDatabase.close()
+            context.deleteDatabase(databaseName)
+        }
     }
 
     // 8. GEN-MEM-3 Unified Retrieval Scoring Formula and Tau_retrieval Verification

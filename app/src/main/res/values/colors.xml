@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="agent_background">#F3F6FA</color>
+    <color name="agent_surface">#FFFFFF</color>
+    <color name="agent_accent">#1565C0</color>
+    <color name="agent_text">#172B4D</color>
+    <color name="agent_secondary_text">#52657A</color>
+    <color name="agent_warning">#A12D2D</color>
+    <color name="agent_success">#276749</color>
+    <color name="agent_border">#D5DFEA</color>
+</resources>

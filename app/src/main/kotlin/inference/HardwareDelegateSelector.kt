@@ -1,84 +1,104 @@
 package inference
 
-/**
- * GEN-EDGE-1 — Hardware Delegate Selection
- * Selects between CPU and GPU Delegate based on Safety-over-Speed criteria.
- *
- * PROVISIONAL - pending GEN-PERF-1:
- * Roadmap Requirement:
- * 1. Benchmark timing: Scheduled via WorkManager with constraints (device charging + >= 5 min idle),
- *    NOT during initial app startup.
- * 2. Methodology: n >= 20 runs for p95, stable decode tokens/sec, peak anonymous memory.
- * 3. Caching: The resulting fingerprint (device + os + model) is persisted and reused across restarts.
- * 4. Safety-over-Speed Decision Rule:
- *    If Peak Anonymous (GPU) < Device LMK Kill Watermark -> GPU.
- *    Otherwise -> CPU (even if GPU is faster).
- *
- * STATUS IN CURRENT SANDBOX:
- * The profiling execution pipeline is BLOCKED on physical ARM64 hardware (same as GEN-PERF-1).
- * In this sandbox environment, the decision logic and caching layer are fully implemented and tested,
- * while the live measurement trigger defaults conservatively to CPU pending actual on-device execution.
- */
+/** The execution delegate hidden behind the existing InferenceProvider contract. */
 enum class HardwareDelegate {
     CPU,
     GPU
 }
 
-data class DevicePerformanceProfile(
-    // PROVISIONAL - pending GEN-PERF-1
-    val deviceFingerprint: String,
-    val prefillP95Ms: Long,
-    val decodeTokensPerSec: Float,
-    val peakAnonymousMemoryMb: Long,
-    val lmkKillWatermarkMb: Long,
-    val sampleCount: Int = 20 // n >= 20 requirement
+data class HardwareDelegateSelection(
+    val delegate: HardwareDelegate,
+    val reason: BackendSelectionReason
 )
 
-interface DeviceProfileStore {
-    fun getCachedProfile(fingerprint: String): DevicePerformanceProfile?
-    fun saveProfile(profile: DevicePerformanceProfile)
-}
-
-class InMemoryDeviceProfileStore : DeviceProfileStore {
-    private val cache = mutableMapOf<String, DevicePerformanceProfile>()
-
-    override fun getCachedProfile(fingerprint: String): DevicePerformanceProfile? = cache[fingerprint]
-
-    override fun saveProfile(profile: DevicePerformanceProfile) {
-        cache[profile.deviceFingerprint] = profile
-    }
-}
-
-class HardwareDelegateSelector(
-    private val profileStore: DeviceProfileStore = InMemoryDeviceProfileStore()
-) {
-    /**
-     * Resolves the hardware delegate.
-     * Uses cached profile if available from previous WorkManager benchmarking runs.
-     * Falls back conservatively to CPU if unprofiled or if memory exceeds watermark.
-     */
-    fun selectDelegate(deviceFingerprint: String?, liveProfile: DevicePerformanceProfile? = null): HardwareDelegate {
-        val profile = liveProfile 
-            ?: (deviceFingerprint?.let { profileStore.getCachedProfile(it) })
-
-        if (profile == null) {
-            // PROVISIONAL - pending GEN-PERF-1: Default conservative fallback is CPU
-            return HardwareDelegate.CPU
+/** Pure, measurement-independent Safety-over-Speed decision. */
+object HardwareDelegateDecision {
+    fun select(
+        fingerprintKey: String?,
+        result: DeviceBenchmarkResult?,
+        gpuRuntimeSafetyStore: GpuRuntimeSafetyStore,
+        nowEpochMs: Long
+    ): HardwareDelegateSelection {
+        if (fingerprintKey.isNullOrBlank()) {
+            return HardwareDelegateSelection(HardwareDelegate.CPU, BackendSelectionReason.NO_FINGERPRINT)
+        }
+        if (result?.isFreshValidMeasurement(fingerprintKey, nowEpochMs) == true) {
+            gpuRuntimeSafetyStore.tryUnlockForFreshProfile(fingerprintKey, result, nowEpochMs)
+        }
+        if (gpuRuntimeSafetyStore.isGpuDisabled(fingerprintKey, nowEpochMs)) {
+            return HardwareDelegateSelection(HardwareDelegate.CPU, BackendSelectionReason.GPU_DISABLED_FOR_FINGERPRINT)
+        }
+        if (result == null) {
+            return HardwareDelegateSelection(HardwareDelegate.CPU, BackendSelectionReason.NO_PROFILE)
+        }
+        if (result.fingerprint.stableKey != fingerprintKey || result.status != DeviceBenchmarkStatus.MEASURED) {
+            return HardwareDelegateSelection(HardwareDelegate.CPU, BackendSelectionReason.PROFILE_NOT_MEASURED)
         }
 
-        // Enforce n >= 20 methodology requirement
-        if (profile.sampleCount < 20) {
-            return HardwareDelegate.CPU
+        val profile = result.profile
+            ?: return HardwareDelegateSelection(HardwareDelegate.CPU, BackendSelectionReason.PROFILE_INVALID)
+        if (result.measurementLabel != BenchmarkMeasurementLabel.BACKGROUND_SCREEN_OFF ||
+            result.conditions == null || result.conditions != profile.conditions ||
+            !profile.isUsableFor(fingerprintKey)
+        ) {
+            return HardwareDelegateSelection(HardwareDelegate.CPU, BackendSelectionReason.PROFILE_INVALID)
+        }
+        val ageMs = nowEpochMs - profile.measuredAtEpochMs
+        if (ageMs < 0L || ageMs > HardwareBenchmarkAssumptions.PROFILE_MAX_AGE_MS) {
+            return HardwareDelegateSelection(HardwareDelegate.CPU, BackendSelectionReason.PROFILE_EXPIRED)
         }
 
-        return if (profile.peakAnonymousMemoryMb < profile.lmkKillWatermarkMb) {
-            HardwareDelegate.GPU
+        // PROVISIONAL 20% headroom margin; stricter than Peak Anonymous < raw LMK watermark.
+        val safeLimit = profile.lmkKillWatermarkMb.toDouble() *
+            HardwareBenchmarkAssumptions.GPU_WATERMARK_SAFETY_FACTOR
+        return if (profile.gpuPeakAnonymousMemoryMb.toDouble() < safeLimit) {
+            HardwareDelegateSelection(HardwareDelegate.GPU, BackendSelectionReason.SAFETY_PROFILE_ACCEPTED)
         } else {
-            HardwareDelegate.CPU
+            HardwareDelegateSelection(HardwareDelegate.CPU, BackendSelectionReason.WATERMARK_HEADROOM_NOT_MET)
         }
     }
+}
 
-    fun cacheProfile(profile: DevicePerformanceProfile) {
-        profileStore.saveProfile(profile)
+/**
+ * Resolves the current DataStore snapshot. Until a complete, stable, safe, fresh profile is loaded,
+ * CPU is selected. A durable GPU lock clears only after a fingerprint change or a qualifying fresh
+ * profile measured after the lock's minimum wait.
+ */
+class HardwareDelegateSelector(
+    private val profileStore: DeviceProfileStore = InMemoryDeviceProfileStore(),
+    val gpuRuntimeSafetyStore: GpuRuntimeSafetyStore = InMemoryGpuRuntimeSafetyStore(),
+    private val clock: () -> Long = System::currentTimeMillis
+) {
+    fun selectSelection(
+        deviceFingerprint: String?,
+        liveProfile: DevicePerformanceProfile? = null
+    ): HardwareDelegateSelection {
+        val result = when {
+            liveProfile != null -> DeviceBenchmarkResult(
+                fingerprint = liveProfile.fingerprint,
+                status = DeviceBenchmarkStatus.MEASURED,
+                profile = liveProfile,
+                updatedAtEpochMs = liveProfile.measuredAtEpochMs,
+                measurementLabel = liveProfile.measurementLabel,
+                conditions = liveProfile.conditions
+            )
+            deviceFingerprint != null -> profileStore.peek(deviceFingerprint)
+            else -> null
+        }
+        return HardwareDelegateDecision.select(deviceFingerprint, result, gpuRuntimeSafetyStore, clock())
     }
+
+    fun profileForFingerprint(
+        deviceFingerprint: String?,
+        liveProfile: DevicePerformanceProfile? = null
+    ): DevicePerformanceProfile? = when {
+        liveProfile != null -> liveProfile
+        deviceFingerprint != null -> profileStore.peek(deviceFingerprint)?.profile
+        else -> null
+    }
+
+    fun selectDelegate(
+        deviceFingerprint: String?,
+        liveProfile: DevicePerformanceProfile? = null
+    ): HardwareDelegate = selectSelection(deviceFingerprint, liveProfile).delegate
 }

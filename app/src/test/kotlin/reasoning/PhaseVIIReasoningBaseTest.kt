@@ -1,5 +1,7 @@
 package reasoning
 
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
 import contracts.GenerateParams
 import contracts.InferenceProvider
 import contracts.InferenceRequest
@@ -9,14 +11,21 @@ import contracts.ProviderType
 import contracts.StructuredCognitiveCall
 import contracts.TokenUsage
 import inference.ContextWindowBudgetPolicy
+import memory.AesGcmCipher
+import memory.EncryptedMemoryStorage
 import memory.LongTermMemoryEntry
 import memory.MemoryType
+import persistence.AgentDatabase
+import testutil.RoomTestEnvironment
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.After
 import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
 /**
  * Phase VII Tier 1 Test Suite:
@@ -25,8 +34,10 @@ import org.junit.Test
  * - GEN-244: Context Manager assembly within budget
  * - GEN-310: Model Failure Recovery & Bounded Retry
  */
+@RunWith(RobolectricTestRunner::class)
 class PhaseVIIReasoningBaseTest {
 
+    private val openedDatabases = mutableListOf<AgentDatabase>()
     private lateinit var mockRetrievalSource: ContextRetrievalSource
     private lateinit var contextManager: ContextManager
 
@@ -49,6 +60,21 @@ class PhaseVIIReasoningBaseTest {
             budgetPolicy = ContextWindowBudgetPolicy(maxContextTokens = 4096),
             retrievalSource = mockRetrievalSource
         )
+    }
+
+    @After
+    fun tearDown() {
+        openedDatabases.forEach(AgentDatabase::close)
+    }
+
+    private fun newRealMemoryManager(): memory.MemoryManager {
+        val cipher = RoomTestEnvironment.newCipher()
+        val database = RoomTestEnvironment.inMemoryDatabase(
+            ApplicationProvider.getApplicationContext<Context>(),
+            cipher
+        )
+        openedDatabases.add(database)
+        return memory.MemoryManager(EncryptedMemoryStorage(database, cipher), testutil.TestUnlockedAppLockAccess)
     }
 
     // 1. GEN-NEW-E Grammar Constraint Validation & GBNF Definition
@@ -249,8 +275,7 @@ class PhaseVIIReasoningBaseTest {
     // 6. GEN-244 <-> GEN-MEM-4 Real Integration Test: ContextManager consumes real pipeline
     @Test
     fun testContextManagerRealRetrievalPipelineIntegration() {
-        val memoryStorage = memory.EncryptedMemoryStorage()
-        val realMemoryManager = memory.MemoryManager(storage = memoryStorage)
+        val realMemoryManager = newRealMemoryManager()
 
         // Seed real long-term memory
         realMemoryManager.saveLongTermMemory(
@@ -381,8 +406,7 @@ class PhaseVIIReasoningBaseTest {
         val governor = TurnBudgetGovernor(maxLlmCallsPerTurn = 3)
         governor.startTurn()
 
-        val memoryStorage = memory.EncryptedMemoryStorage()
-        val realMemoryManager = memory.MemoryManager(storage = memoryStorage)
+        val realMemoryManager = newRealMemoryManager()
 
         val mockProvider = object : InferenceProvider {
             override fun capabilities(): ProviderCapabilities = ProviderCapabilities(

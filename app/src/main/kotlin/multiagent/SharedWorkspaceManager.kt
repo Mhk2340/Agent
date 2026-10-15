@@ -1,7 +1,7 @@
 package multiagent
 
 import memory.AesGcmCipher
-import memory.StandardKeystoreKeyProvider
+import memory.AndroidKeystoreKeyProvider
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -26,7 +26,7 @@ data class WorkspaceArtifact(
 
 class SharedWorkspaceManager(
     private val cipher: AesGcmCipher = AesGcmCipher(
-        keyProvider = StandardKeystoreKeyProvider(),
+        keyProvider = AndroidKeystoreKeyProvider(),
         keyAlias = "android_agent_workspace_vault_key"
     ),
     private val clock: () -> Long = { System.currentTimeMillis() }

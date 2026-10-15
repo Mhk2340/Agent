@@ -1,9 +1,22 @@
 package shared
 
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
+import memory.AesGcmCipher
+import memory.EncryptedMemoryStorage
+import memory.MemoryManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import persistence.AgentDatabase
+import shared.change_management.ChangeProvenanceLogger
+import testutil.RoomTestEnvironment
+import testutil.TestUnlockedAppLockAccess
 import shared.change_management.AllowedChangeTarget
 import shared.change_management.ChangeAuditLogger
 import shared.change_management.ChangeAuditRecord
@@ -12,7 +25,25 @@ import shared.change_management.GoldenTestSetRepository
 import shared.change_management.IsolatedEvaluationSandbox
 import shared.change_management.RollbackManager
 
+@RunWith(RobolectricTestRunner::class)
 class ChangeManagementCoreTest {
+
+    private lateinit var database: AgentDatabase
+    private lateinit var cipher: AesGcmCipher
+
+    @Before
+    fun setup() {
+        cipher = RoomTestEnvironment.newCipher()
+        database = RoomTestEnvironment.inMemoryDatabase(
+            ApplicationProvider.getApplicationContext<Context>(),
+            cipher
+        )
+    }
+
+    @After
+    fun tearDown() {
+        database.close()
+    }
 
     // GEN-CM-1 Golden Test Set & Frozen Holdout separation
     @Test
@@ -69,7 +100,7 @@ class ChangeManagementCoreTest {
     // GEN-CM-7 Change Audit Log
     @Test
     fun testChangeAuditLog() {
-        val logger = ChangeAuditLogger()
+        val logger = ChangeAuditLogger(database, cipher)
         val auditRecord = ChangeAuditRecord(
             changeId = "chg-101",
             targetType = "WEIGHT",
@@ -85,6 +116,7 @@ class ChangeManagementCoreTest {
         assertEquals(1, logs.size)
         assertEquals("chg-101", logs[0].changeId)
         assertEquals("COMMITTED", logs[0].status)
+        assertFalse(database.changeAuditDao().getAll().single().reasonCiphertext.contains(auditRecord.reason))
     }
 
     // GEN-CM-8 Change Safety Guardrails Allowlist Test
@@ -119,9 +151,9 @@ class ChangeManagementCoreTest {
     // GEN-CM-6 Change Provenance Log Append-Only Test with Shared DB Architecture
     @Test
     fun testChangeProvenanceLoggerAppendOnly() {
-        val storage = memory.EncryptedMemoryStorage()
-        val memoryManager = memory.MemoryManager(storage = storage)
-        val provenanceLogger = shared.change_management.ChangeProvenanceLogger(memoryManager = memoryManager)
+        val storage = EncryptedMemoryStorage(database, cipher)
+        val memoryManager = MemoryManager(storage = storage, appLockAccess = TestUnlockedAppLockAccess)
+        val provenanceLogger = ChangeProvenanceLogger(memoryManager = memoryManager, cipher = cipher)
 
         val record = provenanceLogger.recordProvenance(
             changeId = "chg-weight-01",
@@ -140,6 +172,7 @@ class ChangeManagementCoreTest {
         val allProv = provenanceLogger.getAllRecords()
         assertEquals(1, allProv.size)
         assertEquals("chg-weight-01", allProv[0].changeId)
+        assertFalse(database.changeProvenanceDao().getAll().single().rationaleCiphertext.contains(record.rationale))
     }
 
     // GEN-CM-1 Dedicated Retrieval Evaluation Subset Test

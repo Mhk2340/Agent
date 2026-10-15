@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Android Agent</string>
+    <string name="security_intro">Your private assistant stays locked until you unlock it.</string>
+    <string name="runtime_status">Runtime status: %1$s</string>
+    <string name="security_title">Security</string>
+    <string name="pin_setup_title">Create an app PIN</string>
+    <string name="pin_setup_description">A PIN is required on first use. It is stored as a salted, slow hash, never as plain text.</string>
+    <string name="pin_label">PIN (6–12 digits)</string>
+    <string name="pin_confirm_label">Confirm PIN</string>
+    <string name="pin_setup_button">Create PIN</string>
+    <string name="pin_entry_title">Unlock Android Agent</string>
+    <string name="pin_entry_description">Enter your app PIN to continue.</string>
+    <string name="pin_unlock_button">Unlock</string>
+    <string name="biometric_unlock_button">Use biometrics</string>
+    <string name="biometric_prompt_title">Unlock Android Agent</string>
+    <string name="biometric_prompt_description">Confirm your identity to unlock the app.</string>
+    <string name="biometric_negative_button">Use PIN</string>
+    <string name="biometric_unavailable">Biometric authentication is unavailable. Use your PIN.</string>
+    <string name="biometric_error">Biometric authentication did not complete. Use your PIN.</string>
+    <string name="integrity_failure_title">Security state could not be verified</string>
+    <string name="integrity_failure_description">The protected App Lock record failed its integrity check. The app remains locked and no data was automatically erased. Resolve the device or app storage issue before continuing.</string>
+    <string name="retry_button">Retry</string>
+    <string name="home_title">Security home</string>
+    <string name="status_ready">App Lock is active. Memory and Agent actions remain protected.</string>
+    <string name="status_lockdown">Security lockdown is active. Review recovery before using the app.</string>
+    <string name="lockdown_none">No active lockdown</string>
+    <string name="lockdown_panic">Panic Reset lockdown</string>
+    <string name="lockdown_integrity">Security integrity failure</string>
+    <string name="lockdown_mode">Security mode lockdown</string>
+    <string name="settings_button">Security settings</string>
+    <string name="panic_reset_button">Panic Reset</string>
+    <string name="recovery_button">Security recovery</string>
+    <string name="lock_now_button">Lock now</string>
+    <string name="back_button">Back</string>
+    <string name="settings_title">Security settings</string>
+    <string name="settings_description">Saved keys are never shown. Enter a new value to replace a key.</string>
+    <string name="provider_gemini">Gemini Free provider</string>
+    <string name="provider_groq">Groq Free provider</string>
+    <string name="credential_saved">Key saved</string>
+    <string name="credential_not_saved">No key saved</string>
+    <string name="api_key_hint">API key</string>
+    <string name="save_key_button">Save key</string>
+    <string name="remove_key_button">Remove key</string>
+    <string name="timeout_title">Lock after leaving the app</string>
+    <string name="timeout_description">Choose how long the unlocked session may remain in the background.</string>
+    <string name="timeout_save_button">Save timeout</string>
+    <string name="biometric_setting">Allow biometric unlock</string>
+    <string name="biometric_save_button">Save biometric setting</string>
+    <string name="panic_reset_title">Panic Reset</string>
+    <string name="panic_reset_warning">This irreversibly erases stored memories, provider keys, active work, and policy settings. The App PIN is preserved. Security lockdown remains active until you authenticate and release it. Provider keys must be entered again.</string>
+    <string name="panic_reset_phrase_hint">Type exactly: RESET AGENT</string>
+    <string name="confirmation_input_hint">Confirmation phrase</string>
+    <string name="panic_reset_execute_button">Erase data and keep lockdown</string>
+    <string name="recovery_title">Security recovery</string>
+    <string name="recovery_description">Recovery requires an unlocked app and explicit confirmation. Provider keys are cleared and must be entered again.</string>
+    <string name="recovery_release_phrase">Type exactly: RELEASE SECURITY LOCKDOWN</string>
+    <string name="recovery_reset_phrase">Integrity failed. To rebuild the lockdown state, type exactly: RESET SECURITY STATE</string>
+    <string name="recovery_execute_button">Confirm recovery</string>
+    <string name="reset_complete">Panic Reset completed. Reset epoch: %1$d. Security lockdown remains active.</string>
+    <string name="reset_incomplete">Panic Reset is still locked. Failed stages: %1$s</string>
+    <string name="reset_auth_required">Unlock the app before requesting Panic Reset.</string>
+    <string name="reset_result_unexpected">Panic Reset could not be completed.</string>
+    <string name="release_complete">Security recovery completed at epoch %1$d. Provider keys were removed and must be entered again.</string>
+    <string name="security_state_rebuilt">Security state was rebuilt after an integrity failure. Provider keys were removed and must be entered again.</string>
+    <string name="release_failed">Recovery failed at stage: %1$s. Security lockdown remains active.</string>
+    <string name="release_not_locked">No security lockdown is active.</string>
+    <string name="release_auth_required">Unlock the app before attempting recovery.</string>
+    <string name="release_result_unexpected">Security recovery could not be completed.</string>
+    <string name="done_button">Done</string>
+    <string name="message_pin_invalid">Enter a numeric PIN between 6 and 12 digits.</string>
+    <string name="message_pin_mismatch">The PIN entries do not match.</string>
+    <string name="message_pin_incorrect">The PIN is incorrect.</string>
+    <string name="message_pin_locked">Too many incorrect attempts. Wait before trying again.</string>
+    <string name="message_pin_storage">The PIN could not be saved. The app remains locked.</string>
+    <string name="message_key_saved">Provider key saved securely.</string>
+    <string name="message_key_removed">Provider key removed.</string>
+    <string name="message_key_empty">Enter a non-empty API key.</string>
+    <string name="message_key_unknown">That provider is not supported.</string>
+    <string name="message_key_storage">Provider key could not be saved.</string>
+    <string name="message_auth_required">Unlock the app before making this change.</string>
+    <string name="message_lockdown_active">Provider keys cannot be changed while security lockdown is active.</string>
+    <string name="message_timeout_saved">Lock timeout saved.</string>
+    <string name="message_biometric_saved">Biometric setting saved.</string>
+    <string name="message_biometric_failed">Biometric unlock failed. Use your PIN.</string>
+    <string name="message_reset_confirmation">The confirmation phrase did not match.</string>
+    <string name="message_release_confirmation">The recovery phrase did not match.</string>
+    <string-array name="background_timeout_labels">
+        <item>Immediately (0 min)</item>
+        <item>1 minute</item>
+        <item>5 minutes</item>
+        <item>10 minutes</item>
+        <item>30 minutes</item>
+        <item>1 hour</item>
+        <item>2 hours</item>
+        <item>24 hours</item>
+    </string-array>
+</resources>

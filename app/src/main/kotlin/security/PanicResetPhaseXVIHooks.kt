@@ -15,6 +15,10 @@ interface PanicResetPhaseXVIHooks {
     fun purgeActiveSharedWorkspace(): Boolean
 }
 
+/**
+ * TEST ONLY — explicit no-op stub. This class does not cancel jobs or purge any workspace and
+ * MUST NOT be wired into a production AgentContainer or production RealSecurityLockdownEnforcer.
+ */
 class DefaultPanicResetPhaseXVIHooks : PanicResetPhaseXVIHooks {
     @Volatile
     private var jobsCancelledCount: Int = 0
@@ -24,7 +28,7 @@ class DefaultPanicResetPhaseXVIHooks : PanicResetPhaseXVIHooks {
     override fun cancelActiveJobs(): Int {
         runtime.AgentLogger.w(
             "PanicResetPhaseXVIHooks",
-            "cancelActiveJobs called"
+            "TEST-ONLY NO-OP: no AsyncJobManager was supplied; no jobs were cancelled."
         )
         jobsCancelledCount = 0
         return jobsCancelledCount
@@ -33,10 +37,10 @@ class DefaultPanicResetPhaseXVIHooks : PanicResetPhaseXVIHooks {
     override fun purgeActiveSharedWorkspace(): Boolean {
         runtime.AgentLogger.w(
             "PanicResetPhaseXVIHooks",
-            "purgeActiveSharedWorkspace called"
+            "TEST-ONLY NO-OP: no SharedWorkspaceManager was supplied; no workspace was purged."
         )
-        workspacePurged = true
-        return true
+        workspacePurged = false
+        return false
     }
 
     fun wasWorkspacePurged(): Boolean = workspacePurged

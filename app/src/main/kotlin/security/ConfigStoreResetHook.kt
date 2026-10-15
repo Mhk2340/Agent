@@ -9,15 +9,19 @@ interface ConfigStoreResetHook {
     fun resetConfigStoreToSeedDefaults()
 }
 
+/**
+ * TEST ONLY — logging-only stub. It resets no store and MUST NOT be wired into production.
+ */
 class DefaultConfigStoreResetHook(
     private val defaultRateLimitPerHour: Int = 5
 ) : ConfigStoreResetHook {
 
     override fun resetConfigStoreToSeedDefaults() {
-        // Reset to conservative seed defaults (5 Level-3 actions per hour, zero overrides)
+        // TEST ONLY: this stub deliberately changes no storage; production must use
+        // AndroidAgentPolicyConfigResetHook backed by AndroidAgentPolicyConfigStore.
         runtime.AgentLogger.w(
             "ConfigStoreResetHook",
-            "Config Store reset to seed strict defaults (max Level-3 per hour: $defaultRateLimitPerHour, overrides cleared)."
+            "TEST-ONLY NO-OP: Config Store was NOT reset (configured seed ceiling=$defaultRateLimitPerHour)."
         )
     }
 }

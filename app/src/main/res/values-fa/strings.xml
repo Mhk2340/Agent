@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">دستیار اندروید</string>
+    <string name="security_intro">دستیار خصوصی شما تا زمان بازکردن قفل، قفل می‌ماند.</string>
+    <string name="runtime_status">وضعیت اجرا: %1$s</string>
+    <string name="security_title">امنیت</string>
+    <string name="pin_setup_title">ساخت رمز برنامه</string>
+    <string name="pin_setup_description">در نخستین استفاده باید رمز بسازید. رمز فقط به‌صورت هش کند و نمک‌دار نگه‌داری می‌شود، نه متن ساده.</string>
+    <string name="pin_label">رمز (۶ تا ۱۲ رقم)</string>
+    <string name="pin_confirm_label">تکرار رمز</string>
+    <string name="pin_setup_button">ساخت رمز</string>
+    <string name="pin_entry_title">بازکردن قفل دستیار اندروید</string>
+    <string name="pin_entry_description">برای ادامه، رمز برنامه را وارد کنید.</string>
+    <string name="pin_unlock_button">بازکردن قفل</string>
+    <string name="biometric_unlock_button">استفاده از زیست‌سنجی</string>
+    <string name="biometric_prompt_title">بازکردن قفل دستیار اندروید</string>
+    <string name="biometric_prompt_description">برای بازکردن قفل برنامه، هویت خود را تأیید کنید.</string>
+    <string name="biometric_negative_button">استفاده از رمز</string>
+    <string name="biometric_unavailable">احراز هویت زیست‌سنجی در دسترس نیست. از رمز استفاده کنید.</string>
+    <string name="biometric_error">احراز هویت زیست‌سنجی کامل نشد. از رمز استفاده کنید.</string>
+    <string name="integrity_failure_title">صحت وضعیت امنیتی تأیید نشد</string>
+    <string name="integrity_failure_description">بررسی یکپارچگی رکورد محافظت‌شدهٔ App Lock ناموفق بود. برنامه قفل می‌ماند و هیچ داده‌ای خودکار پاک نشده است. پیش از ادامه، مشکل ذخیره‌سازی دستگاه یا برنامه را برطرف کنید.</string>
+    <string name="retry_button">تلاش دوباره</string>
+    <string name="home_title">خانهٔ امنیت</string>
+    <string name="status_ready">قفل برنامه فعال است. حافظه و عملیات Agent محافظت می‌شوند.</string>
+    <string name="status_lockdown">قفل امنیتی فعال است. پیش از استفاده، بازیابی را بررسی کنید.</string>
+    <string name="lockdown_none">قفل امنیتی فعالی وجود ندارد</string>
+    <string name="lockdown_panic">قفل Panic Reset</string>
+    <string name="lockdown_integrity">خطای یکپارچگی امنیت</string>
+    <string name="lockdown_mode">قفل حالت امنیتی</string>
+    <string name="settings_button">تنظیمات امنیت</string>
+    <string name="panic_reset_button">بازنشانی اضطراری</string>
+    <string name="recovery_button">بازیابی امنیت</string>
+    <string name="lock_now_button">قفل‌کردن اکنون</string>
+    <string name="back_button">بازگشت</string>
+    <string name="settings_title">تنظیمات امنیت</string>
+    <string name="settings_description">کلیدهای ذخیره‌شده هرگز نمایش داده نمی‌شوند. برای جایگزینی، مقدار تازه‌ای وارد کنید.</string>
+    <string name="provider_gemini">ارائه‌دهندهٔ Gemini Free</string>
+    <string name="provider_groq">ارائه‌دهندهٔ Groq Free</string>
+    <string name="credential_saved">کلید ذخیره شده</string>
+    <string name="credential_not_saved">کلیدی ذخیره نشده</string>
+    <string name="api_key_hint">کلید API</string>
+    <string name="save_key_button">ذخیرهٔ کلید</string>
+    <string name="remove_key_button">حذف کلید</string>
+    <string name="timeout_title">قفل پس از خروج از برنامه</string>
+    <string name="timeout_description">مدت مجاز ماندن نشستِ بازشده در پس‌زمینه را انتخاب کنید.</string>
+    <string name="timeout_save_button">ذخیرهٔ زمان قفل</string>
+    <string name="biometric_setting">اجازهٔ بازکردن قفل با زیست‌سنجی</string>
+    <string name="biometric_save_button">ذخیرهٔ تنظیم زیست‌سنجی</string>
+    <string name="panic_reset_title">بازنشانی اضطراری</string>
+    <string name="panic_reset_warning">این کار حافظه‌های ذخیره‌شده، کلیدهای ارائه‌دهنده، کارهای فعال و تنظیمات سیاست را به‌طور برگشت‌ناپذیر پاک می‌کند. رمز App Lock حفظ می‌شود. قفل امنیتی تا زمان احراز هویت و آزادسازی صریح فعال می‌ماند. کلیدهای ارائه‌دهنده باید دوباره وارد شوند.</string>
+    <string name="panic_reset_phrase_hint">دقیقاً تایپ کنید: RESET AGENT</string>
+    <string name="confirmation_input_hint">عبارت تأیید</string>
+    <string name="panic_reset_execute_button">پاک‌کردن داده‌ها و حفظ قفل</string>
+    <string name="recovery_title">بازیابی امنیت</string>
+    <string name="recovery_description">بازیابی به برنامهٔ بازشده و تأیید صریح نیاز دارد. کلیدهای ارائه‌دهنده پاک می‌شوند و باید دوباره وارد شوند.</string>
+    <string name="recovery_release_phrase">دقیقاً تایپ کنید: RELEASE SECURITY LOCKDOWN</string>
+    <string name="recovery_reset_phrase">خطای یکپارچگی رخ داده است. برای بازسازی وضعیت قفل، دقیقاً تایپ کنید: RESET SECURITY STATE</string>
+    <string name="recovery_execute_button">تأیید بازیابی</string>
+    <string name="reset_complete">بازنشانی اضطراری انجام شد. شمارهٔ نسل بازنشانی: %1$d. قفل امنیتی همچنان فعال است.</string>
+    <string name="reset_incomplete">بازنشانی اضطراری همچنان قفل است. مرحله‌های ناموفق: %1$s</string>
+    <string name="reset_auth_required">پیش از درخواست بازنشانی اضطراری، برنامه را باز کنید.</string>
+    <string name="reset_result_unexpected">بازنشانی اضطراری کامل نشد.</string>
+    <string name="release_complete">بازیابی امنیت در نسل %1$d انجام شد. کلیدهای ارائه‌دهنده حذف شدند و باید دوباره وارد شوند.</string>
+    <string name="security_state_rebuilt">پس از خطای یکپارچگی، وضعیت امنیتی بازسازی شد. کلیدهای ارائه‌دهنده حذف شدند و باید دوباره وارد شوند.</string>
+    <string name="release_failed">بازیابی در مرحلهٔ %1$s ناموفق بود. قفل امنیتی فعال می‌ماند.</string>
+    <string name="release_not_locked">قفل امنیتی فعالی وجود ندارد.</string>
+    <string name="release_auth_required">پیش از بازیابی، برنامه را باز کنید.</string>
+    <string name="release_result_unexpected">بازیابی امنیت کامل نشد.</string>
+    <string name="done_button">انجام شد</string>
+    <string name="message_pin_invalid">رمز عددی ۶ تا ۱۲ رقمی وارد کنید.</string>
+    <string name="message_pin_mismatch">رمزهای واردشده یکسان نیستند.</string>
+    <string name="message_pin_incorrect">رمز نادرست است.</string>
+    <string name="message_pin_locked">تعداد تلاش‌های نادرست زیاد است. پیش از تلاش دوباره صبر کنید.</string>
+    <string name="message_pin_storage">ذخیرهٔ رمز ناموفق بود. برنامه قفل می‌ماند.</string>
+    <string name="message_key_saved">کلید ارائه‌دهنده به‌صورت امن ذخیره شد.</string>
+    <string name="message_key_removed">کلید ارائه‌دهنده حذف شد.</string>
+    <string name="message_key_empty">یک کلید API غیرخالی وارد کنید.</string>
+    <string name="message_key_unknown">این ارائه‌دهنده پشتیبانی نمی‌شود.</string>
+    <string name="message_key_storage">ذخیرهٔ کلید ارائه‌دهنده ناموفق بود.</string>
+    <string name="message_auth_required">برای این تغییر، ابتدا برنامه را باز کنید.</string>
+    <string name="message_lockdown_active">هنگام فعال‌بودن قفل امنیتی نمی‌توان کلیدها را تغییر داد.</string>
+    <string name="message_timeout_saved">زمان قفل ذخیره شد.</string>
+    <string name="message_biometric_saved">تنظیم زیست‌سنجی ذخیره شد.</string>
+    <string name="message_biometric_failed">بازکردن قفل زیست‌سنجی ناموفق بود. از رمز استفاده کنید.</string>
+    <string name="message_reset_confirmation">عبارت تأیید درست نیست.</string>
+    <string name="message_release_confirmation">عبارت بازیابی درست نیست.</string>
+    <string-array name="background_timeout_labels">
+        <item>بلافاصله (۰ دقیقه)</item>
+        <item>۱ دقیقه</item>
+        <item>۵ دقیقه</item>
+        <item>۱۰ دقیقه</item>
+        <item>۳۰ دقیقه</item>
+        <item>۱ ساعت</item>
+        <item>۲ ساعت</item>
+        <item>۲۴ ساعت</item>
+    </string-array>
+</resources>

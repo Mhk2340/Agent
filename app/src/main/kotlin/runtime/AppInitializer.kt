@@ -1,5 +1,6 @@
 package runtime
 
+import inference.HardwareBenchmarkWorkEnqueuer
 import safety.SafetyGuard
 import safety.ToolRegistryRow
 
@@ -9,7 +10,8 @@ import safety.ToolRegistryRow
  */
 class AppInitializer(
     private val safetyGuard: SafetyGuard,
-    private val initialTools: List<ToolRegistryRow> = emptyList()
+    private val initialTools: List<ToolRegistryRow> = emptyList(),
+    private val hardwareBenchmarkWorkEnqueuer: HardwareBenchmarkWorkEnqueuer? = null
 ) {
     sealed class InitStepResult {
         data class Success(val stepName: String) : InitStepResult()
@@ -43,7 +45,25 @@ class AppInitializer(
             return results
         }
 
-        // Step 3: Transition to IDLE
+        // Step 3: Queue deferred edge profiling only. WorkManager owns constraints/retries;
+        // Application startup never waits for idle or performs model inference/benchmarking.
+        try {
+            hardwareBenchmarkWorkEnqueuer?.enqueue()
+            if (hardwareBenchmarkWorkEnqueuer != null) {
+                results.add(InitStepResult.Success("HardwareBenchmarkWorkEnqueue"))
+            }
+        } catch (e: Exception) {
+            // Profiling is optional; a scheduling failure must not prevent the agent from starting.
+            AgentLogger.w("AppInitializer", "Could not enqueue hardware benchmark work: ${e.message}")
+            results.add(
+                InitStepResult.Failure(
+                    "HardwareBenchmarkWorkEnqueue",
+                    e.message ?: e::class.java.simpleName
+                )
+            )
+        }
+
+        // Step 4: Transition to IDLE
         RuntimeStateManager.transitionTo(AgentState.IDLE)
         results.add(InitStepResult.Success("RuntimeReady"))
         return results

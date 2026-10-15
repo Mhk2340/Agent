@@ -1,0 +1,430 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 3,
+    "identityHash": "e22c0ba701da90183ab974c08484c0fc",
+    "entities": [
+      {
+        "tableName": "long_term_memory",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `memory_type` TEXT NOT NULL, `content` TEXT NOT NULL, `embedding` BLOB, `importance` REAL NOT NULL DEFAULT 0.5, `created_at` INTEGER NOT NULL, `last_accessed_at` INTEGER NOT NULL, `access_count` INTEGER NOT NULL DEFAULT 0, `last_retrieved_at` INTEGER NOT NULL DEFAULT 0, `last_used_at` INTEGER NOT NULL DEFAULT 0, `successful_use_count` INTEGER NOT NULL DEFAULT 0, `superseded_by` TEXT, `origin` TEXT, `guided_by_procedure_id` TEXT, `retry_after` INTEGER, `schema_version` INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "memoryType",
+            "columnName": "memory_type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "content",
+            "columnName": "content",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "embedding",
+            "columnName": "embedding",
+            "affinity": "BLOB",
+            "notNull": false
+          },
+          {
+            "fieldPath": "importance",
+            "columnName": "importance",
+            "affinity": "REAL",
+            "notNull": true,
+            "defaultValue": "0.5"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastAccessedAt",
+            "columnName": "last_accessed_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "accessCount",
+            "columnName": "access_count",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "lastRetrievedAt",
+            "columnName": "last_retrieved_at",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "lastUsedAt",
+            "columnName": "last_used_at",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "successfulUseCount",
+            "columnName": "successful_use_count",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "supersededBy",
+            "columnName": "superseded_by",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "origin",
+            "columnName": "origin",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "guidedByProcedureId",
+            "columnName": "guided_by_procedure_id",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "retryAfter",
+            "columnName": "retry_after",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "schemaVersion",
+            "columnName": "schema_version",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "1"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "action_audit_log",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`audit_id` TEXT NOT NULL, `action_id` TEXT NOT NULL, `skill_name` TEXT NOT NULL, `risk_level` INTEGER NOT NULL, `initiator` TEXT NOT NULL, `params_ciphertext` TEXT NOT NULL, `confirmation_prompt_ciphertext` TEXT, `user_confirmed` INTEGER NOT NULL, `status` TEXT NOT NULL, `output_ciphertext` TEXT, `failure_reason_ciphertext` TEXT, `cost_ms` INTEGER NOT NULL, `idempotency_key` TEXT, `guided_by_procedure_id` TEXT, `origin` TEXT NOT NULL, `timestamp` INTEGER NOT NULL, `schema_version` INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(`audit_id`))",
+        "fields": [
+          {
+            "fieldPath": "auditId",
+            "columnName": "audit_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "actionId",
+            "columnName": "action_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "skillName",
+            "columnName": "skill_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "riskLevel",
+            "columnName": "risk_level",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "initiator",
+            "columnName": "initiator",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "paramsCiphertext",
+            "columnName": "params_ciphertext",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "confirmationPromptCiphertext",
+            "columnName": "confirmation_prompt_ciphertext",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "userConfirmed",
+            "columnName": "user_confirmed",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "outputCiphertext",
+            "columnName": "output_ciphertext",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "failureReasonCiphertext",
+            "columnName": "failure_reason_ciphertext",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "costMs",
+            "columnName": "cost_ms",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "idempotencyKey",
+            "columnName": "idempotency_key",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "guidedByProcedureId",
+            "columnName": "guided_by_procedure_id",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "origin",
+            "columnName": "origin",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timestamp",
+            "columnName": "timestamp",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "schemaVersion",
+            "columnName": "schema_version",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "1"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "audit_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_action_audit_log_idempotency_key_status",
+            "unique": false,
+            "columnNames": [
+              "idempotency_key",
+              "status"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_action_audit_log_idempotency_key_status` ON `${TABLE_NAME}` (`idempotency_key`, `status`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "action_idempotency",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`idempotency_key` TEXT NOT NULL, `status` TEXT NOT NULL, PRIMARY KEY(`idempotency_key`))",
+        "fields": [
+          {
+            "fieldPath": "idempotencyKey",
+            "columnName": "idempotency_key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "idempotency_key"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "change_provenance_log",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`provenance_id` TEXT NOT NULL, `change_id` TEXT NOT NULL, `trigger_signal_id` TEXT NOT NULL, `source_experience_id` TEXT, `rationale_ciphertext` TEXT NOT NULL, `proposed_target` TEXT NOT NULL, `timestamp` INTEGER NOT NULL, `schema_version` INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(`provenance_id`))",
+        "fields": [
+          {
+            "fieldPath": "provenanceId",
+            "columnName": "provenance_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "changeId",
+            "columnName": "change_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "triggerSignalId",
+            "columnName": "trigger_signal_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceExperienceId",
+            "columnName": "source_experience_id",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "rationaleCiphertext",
+            "columnName": "rationale_ciphertext",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "proposedTarget",
+            "columnName": "proposed_target",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timestamp",
+            "columnName": "timestamp",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "schemaVersion",
+            "columnName": "schema_version",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "1"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "provenance_id"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "change_audit_log",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`change_id` TEXT NOT NULL, `target_type` TEXT NOT NULL, `target_key` TEXT NOT NULL, `status` TEXT NOT NULL, `reason_ciphertext` TEXT NOT NULL, `timestamp` INTEGER NOT NULL, `schema_version` INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(`change_id`))",
+        "fields": [
+          {
+            "fieldPath": "changeId",
+            "columnName": "change_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetType",
+            "columnName": "target_type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetKey",
+            "columnName": "target_key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "reasonCiphertext",
+            "columnName": "reason_ciphertext",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timestamp",
+            "columnName": "timestamp",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "schemaVersion",
+            "columnName": "schema_version",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "1"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "change_id"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "provider_secrets",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`provider_id` TEXT NOT NULL, `ciphertext` BLOB NOT NULL, PRIMARY KEY(`provider_id`))",
+        "fields": [
+          {
+            "fieldPath": "providerId",
+            "columnName": "provider_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ciphertext",
+            "columnName": "ciphertext",
+            "affinity": "BLOB",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "provider_id"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      }
+    ],
+    "views": [],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'e22c0ba701da90183ab974c08484c0fc')"
+    ]
+  }
+}

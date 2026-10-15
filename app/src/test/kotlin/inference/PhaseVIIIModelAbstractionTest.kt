@@ -49,44 +49,73 @@ class PhaseVIIIModelAbstractionTest {
 
     // 2. GEN-EDGE-1 Hardware Delegate Selection (Safety over Speed & Profile Caching)
     @Test
-    fun testHardwareDelegateSelectionAndCaching() {
+    fun testHardwareDelegateSelectionAndCaching() = kotlinx.coroutines.runBlocking {
         val store = InMemoryDeviceProfileStore()
-        val selector = HardwareDelegateSelector(profileStore = store)
-        val fingerprint = "arm64-android14-qwen4b"
-
-        // Case A: GPU anonymous memory exceeds kill watermark -> CPU selected despite high speed
-        val highMemGpuProfile = DevicePerformanceProfile(
-            deviceFingerprint = fingerprint,
-            prefillP95Ms = 1500L,
-            decodeTokensPerSec = 22.5f,
-            peakAnonymousMemoryMb = 850L,
-            lmkKillWatermarkMb = 700L,
-            sampleCount = 25
+        val now = System.currentTimeMillis()
+        val selector = HardwareDelegateSelector(store, InMemoryGpuRuntimeSafetyStore()) { now }
+        val fingerprint = DeviceFingerprint(
+            device = "arm64 test device",
+            osBuild = "test-os-build",
+            modelSha256 = "a".repeat(64),
+            runtimeVersion = "test-runtime-1"
         )
-        val delegateA = selector.selectDelegate(fingerprint, highMemGpuProfile)
-        assertEquals("Safety-over-Speed: When memory exceeds watermark, CPU delegate must be chosen", HardwareDelegate.CPU, delegateA)
 
-        // Case B: GPU anonymous memory is safely below watermark -> GPU selected and cached
-        val safeMemGpuProfile = DevicePerformanceProfile(
-            deviceFingerprint = fingerprint,
-            prefillP95Ms = 1800L,
-            decodeTokensPerSec = 20.0f,
-            peakAnonymousMemoryMb = 450L,
+        fun profile(peakAnonymousMb: Long, sampleCount: Int = 50) = DevicePerformanceProfile(
+            fingerprint = fingerprint,
+            contextTokens = HardwareBenchmarkAssumptions.CONTEXT_TOKENS,
+            warmupRuns = 3,
+            sampleCount = sampleCount,
+            gpuPrefillLatency = LatencyStatistics(1000.0, 1500.0, 1800.0, 120.0),
+            gpuDecodeRate = DecodeRateStatistics(18.0, 20.0, 22.0, 1.2),
+            gpuPeakAnonymousMemoryMb = peakAnonymousMb,
             lmkKillWatermarkMb = 700L,
-            sampleCount = 20
+            measuredAtEpochMs = now,
+            measurementLabel = BenchmarkMeasurementLabel.BACKGROUND_SCREEN_OFF,
+            conditions = BenchmarkConditions(
+                BenchmarkConditionSnapshot(true, 80, false, true, BenchmarkThermalStatus.NORMAL, now),
+                BenchmarkConditionSnapshot(true, 80, false, true, BenchmarkThermalStatus.NORMAL, now)
+            )
         )
-        selector.cacheProfile(safeMemGpuProfile)
 
-        // Subsequent launch: read delegate strictly from cached profile without live benchmark
-        val cachedDelegate = selector.selectDelegate(fingerprint, liveProfile = null)
-        assertEquals("Cached profile with safe memory should yield GPU delegate", HardwareDelegate.GPU, cachedDelegate)
+        // Prefill/decode are retained as separate summaries; memory remains a hard safety gate.
+        val highMemGpuProfile = profile(peakAnonymousMb = 850L)
+        assertEquals(
+            "Safety-over-Speed selects CPU even when timing and decode summaries are present",
+            HardwareDelegate.CPU,
+            selector.selectDelegate(fingerprint.stableKey, highMemGpuProfile)
+        )
 
-        // Case C: Null profile or unprofiled device -> Safe default is CPU
-        assertEquals(HardwareDelegate.CPU, selector.selectDelegate("unknown-device", liveProfile = null))
+        // A valid profile under a different fingerprint is never reused.
+        val changedFingerprint = fingerprint.copy(osBuild = "updated-os-build")
+        assertEquals(
+            HardwareDelegate.CPU,
+            selector.selectDelegate(changedFingerprint.stableKey, highMemGpuProfile)
+        )
 
-        // Case D: Sample count below n=20 methodology rule -> Rejected to fallback CPU
-        val insufficientSampleProfile = safeMemGpuProfile.copy(sampleCount = 10)
-        assertEquals(HardwareDelegate.CPU, selector.selectDelegate(fingerprint, insufficientSampleProfile))
+        val safeMemGpuProfile = profile(peakAnonymousMb = 450L)
+        store.saveResult(
+            DeviceBenchmarkResult(
+                fingerprint = fingerprint,
+                status = DeviceBenchmarkStatus.MEASURED,
+                profile = safeMemGpuProfile,
+                updatedAtEpochMs = safeMemGpuProfile.measuredAtEpochMs,
+                measurementLabel = BenchmarkMeasurementLabel.BACKGROUND_SCREEN_OFF,
+                conditions = safeMemGpuProfile.conditions
+            )
+        )
+        assertEquals(
+            "Cached valid profile with GPU Peak Anonymous below the watermark selects GPU",
+            HardwareDelegate.GPU,
+            selector.selectDelegate(fingerprint.stableKey)
+        )
+
+        // Null/stale/unprofiled state and undersized methodology samples all remain CPU.
+        assertEquals(HardwareDelegate.CPU, selector.selectDelegate(null))
+        assertEquals(HardwareDelegate.CPU, selector.selectDelegate("unknown-device"))
+        assertEquals(
+            HardwareDelegate.CPU,
+            selector.selectDelegate(fingerprint.stableKey, safeMemGpuProfile.copy(sampleCount = 20))
+        )
     }
 
     // 3. GEN-271 & GEN-278 Local Inference Engine Integration with Mock

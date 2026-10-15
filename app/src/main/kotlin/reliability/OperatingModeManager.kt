@@ -67,8 +67,12 @@ interface SecurityLockdownEnforcer {
     fun isMemoryReadOnly(): Boolean
     fun areMutatingToolsAllowed(): Boolean
     fun isExternalNetworkAllowed(): Boolean
+
+    /** Persistent Panic Reset latch; ordinary operating-mode transitions cannot clear it. */
+    fun isPanicResetLatched(): Boolean = false
 }
 
+/** TEST ONLY — flag-only fallback. Production AgentContainer injects RealSecurityLockdownEnforcer. */
 class DefaultSecurityLockdownEnforcer : SecurityLockdownEnforcer {
     @Volatile
     private var lockdownActive: Boolean = false
@@ -172,6 +176,13 @@ class AgentOperatingModeManager(
 
     @Synchronized
     fun transitionTo(newMode: OperatingMode, reason: String) {
+        if (newMode != OperatingMode.SECURITY_LOCKDOWN && securityLockdownEnforcer.isPanicResetLatched()) {
+            runtime.AgentLogger.w(
+                "OperatingModeManager",
+                "Transition refused: Panic Reset lockdown remains latched."
+            )
+            return
+        }
         if (currentMode == newMode) return
         val previous = currentMode
         currentMode = newMode
@@ -223,6 +234,24 @@ class AgentOperatingModeManager(
     fun resolveEffectiveHardwareDelegate(deviceFingerprint: String?): HardwareDelegate {
         val (_, delegate) = resolveInferenceExecutionPath(deviceFingerprint)
         return delegate ?: HardwareDelegate.CPU
+    }
+
+    /**
+     * Recovery-only transition invoked after the durable latch and its audit have completed.
+     * Listener failures are isolated so UI/telemetry callbacks cannot undo the in-memory unlock.
+     */
+    @Synchronized
+    fun completeAuthenticatedSecurityRecovery() {
+        if (securityLockdownEnforcer.isPanicResetLatched()) {
+            throw SecurityException("Persistent security lockdown remains active")
+        }
+        val previous = currentMode
+        if (previous == OperatingMode.NORMAL) return
+        currentMode = OperatingMode.NORMAL
+        if (previous == OperatingMode.SECURITY_LOCKDOWN) {
+            securityLockdownEnforcer.enforceLockdown(false)
+        }
+        transitionListeners.forEach { listener -> runCatching { listener(previous, OperatingMode.NORMAL) } }
     }
 
     fun addTransitionListener(listener: (OperatingMode, OperatingMode) -> Unit) {

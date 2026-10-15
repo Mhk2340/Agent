@@ -13,6 +13,10 @@ build/
 *.class
 *.apk
 *.aar
+*.tmp
+*.temp
+*.swp
+tmp/
 /tmp/
 build/
 .gradle/

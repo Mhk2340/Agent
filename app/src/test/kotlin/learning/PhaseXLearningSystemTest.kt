@@ -1,5 +1,7 @@
 package learning
 
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
 import contracts.ExecutionDetails
 import contracts.ExperienceRecord
 import memory.EncryptedMemoryStorage
@@ -12,8 +14,14 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.After
 import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import persistence.AgentDatabase
+import testutil.RoomTestEnvironment
+import testutil.TestUnlockedAppLockAccess
 
 /**
  * Phase X Learning System Test Suite:
@@ -21,8 +29,10 @@ import org.junit.Test
  * - GEN-362: Example Bank Consolidation Policy (Procedural promotion upon pattern frequency, Failure promotion, Weak signal retention)
  * - GEN-363: Adaptive Ranking Weight Update (EMA tuning of GEN-MEM-3 weights, normalization, bounds, rollback, generation_id)
  */
+@RunWith(RobolectricTestRunner::class)
 class PhaseXLearningSystemTest {
 
+    private lateinit var database: AgentDatabase
     private lateinit var pipeline: FeedbackSignalPipeline
     private lateinit var memoryManager: MemoryManager
     private lateinit var consolidationPolicy: ExampleBankConsolidationPolicy
@@ -31,11 +41,22 @@ class PhaseXLearningSystemTest {
 
     @Before
     fun setup() {
+        val cipher = RoomTestEnvironment.newCipher()
+        database = RoomTestEnvironment.inMemoryDatabase(
+            ApplicationProvider.getApplicationContext<Context>(),
+            cipher
+        )
+        val storage = EncryptedMemoryStorage(database, cipher)
         pipeline = FeedbackSignalPipeline(editRatioThreshold = 0.15f)
-        memoryManager = MemoryManager(storage = EncryptedMemoryStorage())
+        memoryManager = MemoryManager(storage = storage, appLockAccess = TestUnlockedAppLockAccess)
         consolidationPolicy = ExampleBankConsolidationPolicy(memoryManager, minPatternOccurrences = 3)
         scorer = UnifiedRetrievalScorer()
         updater = AdaptiveRankingWeightUpdater(scorer, learningRate = 0.05f)
+    }
+
+    @After
+    fun tearDown() {
+        database.close()
     }
 
     // 1. GEN-361 Edit Distance Ratio & Provisional Threshold Test

@@ -1,33 +1,31 @@
 package security
 
+import inference.PanicResetBenchmarkWorkCanceller
+import memory.AesGcmCipher
 import memory.EncryptedMemoryStorage
-import memory.MemoryCallerRole
+import memory.KeystoreKeyProvider
 import memory.MemoryManager
-import memory.MemoryType
 import reliability.SecurityLockdownEnforcer
 import runtime.AgentLogger
 import skills.ActionAuditLog
 import skills.ActionRateLimiter
+import safety.RiskLevel
+
+/** Cause-free summary; it contains stage identifiers only, never exception text or user/provider data. */
+class PanicResetIncompleteException(
+    failedStages: List<String>
+) : IllegalStateException(
+    "Panic Reset remains locked; failed stages: ${failedStages.joinToString(", ")}"
+) {
+    val failedStages: List<String> = failedStages.toList()
+}
 
 /**
- * GEN-SEC-3 — Panic Reset & Security Lockdown Controller
+ * GEN-SEC-3 — Panic Reset & Security Lockdown Controller.
  *
- * CRITICAL ARCHITECTURAL CONSTRAINTS:
- * 1. Panic Reset is a Level 3 action: It consumes 1 unit from ActionRateLimiter (GEN-NEW-RATE)
- *    and NEVER resets or wipes ActionRateLimiter counters.
- * 2. Immutable Safety Invariants: NEVER touches, modifies, or resets:
- *    - GEN-NEW-GUARD
- *    - SkillRiskRegistry (base contracts)
- *    - ActionRateLimiter execution counters
- * 3. Config Store Reset to Strict Seed Defaults (Patch #2):
- *    - Config Store (risk_levels, rate limit ceilings) is reset to conservative seed defaults
- *      (neither deleted nor left untouched).
- * 4. Atomic destruction of sensitive data & Phase XVI cancellation (Patch #1):
- *    - Purges all LongTermMemory and SessionMemory.
- *    - Purges all external API credentials from SecretManager.
- *    - Invokes PanicResetPhaseXVIHooks to cancel active jobs and purge shared workspace.
- *    - Increments strictly monotonic reset_epoch via SecurityEpochStore.
- *    - Writes mandatory Genesis audit record: "Reset at T, epoch=N, prior history unreadable".
+ * The durable panic latch is set before destructive work. Each operation is isolated so an error
+ * cannot skip later cleanup. A failed stage is reported only by its fixed identifier; no exception
+ * message or cause is logged or propagated. The Level-3 counter is consumed but never cleared.
  */
 class RealSecurityLockdownEnforcer(
     private val memoryManager: MemoryManager,
@@ -35,23 +33,35 @@ class RealSecurityLockdownEnforcer(
     private val secretManager: SecretManager,
     private val epochStore: SecurityEpochStore,
     private val rateLimiter: ActionRateLimiter,
-    private val appLockManager: AppLockManager = AppLockManager(),
-    // Integrated with Phase XVI (GEN-MA-3, GEN-MA-8)
-    private val phaseXVIHooks: PanicResetPhaseXVIHooks = DefaultPanicResetPhaseXVIHooks(),
-    private val configStoreResetHook: ConfigStoreResetHook = DefaultConfigStoreResetHook(),
+    private val actionAuditLog: ActionAuditLog,
+    private val databaseKeyProvider: KeystoreKeyProvider,
+    private val panicResetLockdownStore: PanicResetLockdownStore,
+    private val phaseXVIHooks: PanicResetPhaseXVIHooks,
+    private val benchmarkWorkCanceller: PanicResetBenchmarkWorkCanceller,
+    private val configStoreResetHook: ConfigStoreResetHook,
+    private val appLockManager: AppLockManager,
     private val clock: () -> Long = { System.currentTimeMillis() }
 ) : SecurityLockdownEnforcer {
 
     @Volatile
     private var isLockdownActive: Boolean = false
 
+    @Volatile
+    private var panicResetLatchedInProcess: Boolean = false
+
     override fun enforceLockdown(enabled: Boolean) {
+        if (!enabled && isPanicResetLatched()) {
+            isLockdownActive = true
+            appLockManager.lock()
+            AgentLogger.w("SecurityLockdown", "Panic Reset latch prevents ordinary lockdown release.")
+            return
+        }
         isLockdownActive = enabled
         if (enabled) {
             appLockManager.lock()
-            AgentLogger.w("SecurityLockdown", "REAL Security Lockdown ACTIVATED: Memory READ-ONLY, Level 2/3 skills disabled.")
+            AgentLogger.w("SecurityLockdown", "Security lockdown active: mutating actions and external routing disabled.")
         } else {
-            AgentLogger.i("SecurityLockdown", "Security Lockdown DEACTIVATED.")
+            AgentLogger.i("SecurityLockdown", "Security lockdown deactivated.")
         }
     }
 
@@ -59,56 +69,121 @@ class RealSecurityLockdownEnforcer(
     override fun areMutatingToolsAllowed(): Boolean = !isLockdownActive
     override fun isExternalNetworkAllowed(): Boolean = !isLockdownActive
 
+    override fun isPanicResetLatched(): Boolean {
+        if (panicResetLatchedInProcess) return true
+        return try {
+            panicResetLockdownStore.isLocked()
+        } catch (_: Exception) {
+            // An unreadable integrity-protected latch is treated as locked.
+            true
+        }
+    }
+
+    /** Called only by the authenticated recovery coordinator after the durable two-phase release. */
+    @Synchronized
+    internal fun completeAuthorizedRelease() {
+        if (panicResetLockdownStore.isLocked()) {
+            throw SecurityException("Panic Reset release is not durable")
+        }
+        panicResetLatchedInProcess = false
+        isLockdownActive = false
+    }
+
+    /** Keeps this process fail-closed if an authorized release stops part-way through. */
+    @Synchronized
+    internal fun retainLockdownAfterFailedRelease() {
+        panicResetLatchedInProcess = true
+        isLockdownActive = true
+        appLockManager.lock()
+    }
+
     /**
-     * Executes Panic Reset (GEN-SEC-3).
-     * Returns the newly incremented security epoch.
+     * Executes Panic Reset. The supplied reason is intentionally not logged or persisted because
+     * it may contain plaintext or provider data. Returns the monotonically incremented epoch when
+     * every stage succeeds; otherwise throws a cause-free [PanicResetIncompleteException].
      */
+    @Suppress("UNUSED_PARAMETER")
     @Synchronized
     fun executePanicReset(reason: String): Long {
-        // Constraint 1: Panic Reset consumes from ActionRateLimiter Level-3 quota
-        val rateCheck = rateLimiter.checkAndRecord(safety.RiskLevel.LEVEL_3)
-        check(rateCheck.allowed) {
-            "Panic Reset rejected by Action Rate Limiter (GEN-NEW-RATE): Hourly Level-3 action ceiling exceeded."
+        // Immediate in-process closure precedes even the first fallible storage operation.
+        panicResetLatchedInProcess = true
+        enforceLockdown(true)
+
+        val failures = mutableListOf<String>()
+        fun attempt(stage: String, operation: () -> Unit) {
+            try {
+                operation()
+            } catch (_: Exception) {
+                failures += stage
+                AgentLogger.e("PanicReset", "Stage failed: $stage")
+            }
         }
 
-        AgentLogger.w("PanicReset", "Executing PANIC RESET: reason=$reason")
+        attempt("persistent-lockdown-latch") { panicResetLockdownStore.latch() }
+        attempt("level-3-budget") {
+            val check = rateLimiter.checkAndRecord(RiskLevel.LEVEL_3)
+            if (!check.allowed) throw IllegalStateException("Level-3 budget unavailable")
+        }
+        var longTermMemoryCleared = false
+        attempt("long-term-memory") {
+            memoryStorage.clearAll()
+            longTermMemoryCleared = true
+        }
+        attempt("session-memory") { memoryManager.clearSessionForPanicReset() }
+        attempt("provider-secrets") { secretManager.clearAllSecrets() }
+        attempt("active-async-jobs") { phaseXVIHooks.cancelActiveJobs() }
+        attempt("benchmark-work") { benchmarkWorkCanceller.cancelForPanicReset() }
+        attempt("shared-workspace") { phaseXVIHooks.purgeActiveSharedWorkspace() }
+        attempt("policy-config") { configStoreResetHook.resetConfigStoreToSeedDefaults() }
 
-        // 1. Wipe LongTermMemory and SessionMemory
-        memoryStorage.clearAll()
-        memoryManager.clearSession(MemoryCallerRole.SYSTEM_CORE)
+        var newEpoch: Long? = null
+        attempt("security-epoch") { newEpoch = epochStore.incrementEpoch() }
 
-        // 2. Wipe all external API credentials from Secret Vault
-        secretManager.clearAllSecrets()
+        // The current DB AES key is shared by encrypted long-term memory and AUDIT payloads.
+        // Retire it before Genesis so older ciphertext cannot be decrypted; recordPanicResetGenesis
+        // then creates a fresh key for the new Genesis row only.
+        var databaseKeyRetired = false
+        attempt("audit-key-retirement") {
+            val previousKey = databaseKeyProvider.getSecretKey(AesGcmCipher.DEFAULT_DATABASE_KEY_ALIAS)
+            val deleted = databaseKeyProvider.deleteSecretKey(AesGcmCipher.DEFAULT_DATABASE_KEY_ALIAS)
+            databaseKeyRetired = previousKey == null || deleted
+            if (!databaseKeyRetired) throw IllegalStateException("Previous database key remained present")
+        }
+        var fallbackMemoryCleared = longTermMemoryCleared
+        var fallbackAuditPurged = false
+        if (!databaseKeyRetired) {
+            // If key deletion fails, retry deletion of the encrypted memory rows and remove the old
+            // audit/idempotency rows. Genesis is written only when both prior histories are retired.
+            if (!fallbackMemoryCleared) {
+                attempt("memory-fallback-purge") {
+                    memoryStorage.clearAll()
+                    fallbackMemoryCleared = true
+                }
+            }
+            attempt("audit-history-fallback-purge") {
+                actionAuditLog.clearHistoryForPanicReset()
+                fallbackAuditPurged = true
+            }
+        }
+        val priorHistoryUnreadable = databaseKeyRetired || (fallbackMemoryCleared && fallbackAuditPurged)
 
-        // 3. Reset Config Store to strict seed defaults (Patch #2)
-        configStoreResetHook.resetConfigStoreToSeedDefaults()
+        if (newEpoch == null) {
+            failures += "genesis-audit-epoch-unavailable"
+            AgentLogger.e("PanicReset", "Stage failed: genesis-audit-epoch-unavailable")
+        } else if (!priorHistoryUnreadable) {
+            failures += "genesis-audit-history-not-retired"
+            AgentLogger.e("PanicReset", "Stage failed: genesis-audit-history-not-retired")
+        } else {
+            attempt("genesis-audit") {
+                actionAuditLog.recordPanicResetGenesis(clock(), checkNotNull(newEpoch))
+            }
+        }
 
-        // 4. Trigger Phase XVI forward-dependency hooks (Cancel jobs & purge workspace) (Patch #1)
-        phaseXVIHooks.cancelActiveJobs()
-        phaseXVIHooks.purgeActiveSharedWorkspace()
-
-        // 5. Monotonically increment reset_epoch (CANNOT be reset to 0)
-        val newEpoch = epochStore.incrementEpoch()
-
-        // 6. Lock application
-        appLockManager.lock()
-
-        // 7. Mandatory Genesis Record in Long-Term Memory
-        val now = clock()
-        val genesisMessage = "[GENESIS_RECORD] Panic Reset executed at $now, epoch=$newEpoch, prior history unreadable. Reason: $reason"
-        memoryManager.saveLongTermMemory(
-            memoryType = MemoryType.EPISODIC,
-            content = genesisMessage,
-            embedding = null,
-            importance = 1.0f,
-            origin = "panic_reset",
-            guidedByProcedureId = null,
-            retryAfter = null,
-            schemaVersion = 1,
-            callerRole = MemoryCallerRole.SYSTEM_CORE
-        )
-
-        AgentLogger.w("PanicReset", "Panic Reset completed successfully. New reset_epoch: $newEpoch")
-        return newEpoch
+        val completedEpoch = newEpoch
+        if (failures.isNotEmpty() || completedEpoch == null) {
+            throw PanicResetIncompleteException(failures.ifEmpty { listOf("security-epoch") })
+        }
+        AgentLogger.w("PanicReset", "Reset sequence finished with epoch=$completedEpoch; lockdown remains latched.")
+        return completedEpoch
     }
 }

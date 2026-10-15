@@ -1,10 +1,13 @@
 package shared.change_management
 
-import memory.LongTermMemoryEntry
+import memory.AesGcmCipher
 import memory.MemoryCallerRole
 import memory.MemoryManager
 import memory.MemoryType
 import memory.UnifiedScoringWeights
+import persistence.ChangeAuditEntity
+import persistence.ChangeProvenanceEntity
+import persistence.AgentDatabase
 import runtime.AgentLogger
 import runtime.Identity
 import java.util.concurrent.ConcurrentHashMap
@@ -445,9 +448,10 @@ class RollbackManager {
  */
 class ChangeProvenanceLogger(
     private val memoryManager: MemoryManager,
+    private val cipher: AesGcmCipher = AesGcmCipher(),
     private val clock: () -> Long = { System.currentTimeMillis() }
 ) {
-    private val provenanceLog = CopyOnWriteArrayList<ChangeProvenanceRecord>()
+    private val database get() = memoryManager.database
 
     fun recordProvenance(
         changeId: String,
@@ -466,35 +470,80 @@ class ChangeProvenanceLogger(
             timestamp = clock(),
             schemaVersion = 1
         )
-        provenanceLog.add(record)
 
-        memoryManager.saveLongTermMemory(
-            memoryType = MemoryType.EPISODIC,
-            content = "[PROVENANCE] Change $changeId for $proposedTarget triggered by signal $triggerSignalId: $rationale",
-            embedding = null,
-            importance = 0.5f,
-            origin = "real",
-            guidedByProcedureId = null,
-            retryAfter = null,
-            schemaVersion = 1,
-            callerRole = MemoryCallerRole.SYSTEM_CORE
-        )
+        database.runInTransaction {
+            database.changeProvenanceDao().insert(
+                ChangeProvenanceEntity(
+                    provenanceId = record.provenanceId,
+                    changeId = record.changeId,
+                    triggerSignalId = record.triggerSignalId,
+                    sourceExperienceId = record.sourceExperienceId,
+                    rationaleCiphertext = cipher.encrypt(record.rationale),
+                    proposedTarget = record.proposedTarget,
+                    timestamp = record.timestamp,
+                    schemaVersion = record.schemaVersion
+                )
+            )
+            memoryManager.saveLongTermMemory(
+                memoryType = MemoryType.EPISODIC,
+                content = "[PROVENANCE] Change $changeId for $proposedTarget triggered by signal $triggerSignalId: $rationale",
+                embedding = null,
+                importance = 0.5f,
+                origin = "real",
+                guidedByProcedureId = null,
+                retryAfter = null,
+                schemaVersion = 1,
+                callerRole = MemoryCallerRole.SYSTEM_CORE
+            )
+        }
 
         return record
     }
 
-    fun getAllRecords(): List<ChangeProvenanceRecord> = provenanceLog.toList()
+    fun getAllRecords(): List<ChangeProvenanceRecord> = database.changeProvenanceDao().getAll().map { entity ->
+        ChangeProvenanceRecord(
+            provenanceId = entity.provenanceId,
+            changeId = entity.changeId,
+            triggerSignalId = entity.triggerSignalId,
+            sourceExperienceId = entity.sourceExperienceId,
+            rationale = cipher.decrypt(entity.rationaleCiphertext),
+            proposedTarget = entity.proposedTarget,
+            timestamp = entity.timestamp,
+            schemaVersion = entity.schemaVersion
+        )
+    }
 }
 
 /**
- * GEN-CM-7 — Change Audit Logger
+ * GEN-CM-7 — Append-only Change Audit Logger in the shared Room database.
  */
-class ChangeAuditLogger {
-    private val auditLogs = CopyOnWriteArrayList<ChangeAuditRecord>()
-
+class ChangeAuditLogger(
+    private val database: AgentDatabase,
+    private val cipher: AesGcmCipher = AesGcmCipher()
+) {
     fun record(record: ChangeAuditRecord) {
-        auditLogs.add(record)
+        database.changeAuditDao().insert(
+            ChangeAuditEntity(
+                changeId = record.changeId,
+                targetType = record.targetType,
+                targetKey = record.targetKey,
+                status = record.status,
+                reasonCiphertext = cipher.encrypt(record.reason),
+                timestamp = record.timestamp,
+                schemaVersion = record.schemaVersion
+            )
+        )
     }
 
-    fun getAllRecords(): List<ChangeAuditRecord> = auditLogs.toList()
+    fun getAllRecords(): List<ChangeAuditRecord> = database.changeAuditDao().getAll().map { entity ->
+        ChangeAuditRecord(
+            changeId = entity.changeId,
+            targetType = entity.targetType,
+            targetKey = entity.targetKey,
+            status = entity.status,
+            reason = cipher.decrypt(entity.reasonCiphertext),
+            timestamp = entity.timestamp,
+            schemaVersion = entity.schemaVersion
+        )
+    }
 }

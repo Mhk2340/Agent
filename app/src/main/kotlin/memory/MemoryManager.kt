@@ -2,6 +2,7 @@ package memory
 
 import runtime.AgentLogger
 import runtime.Identity
+import security.AppLockAccess
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
@@ -26,7 +27,8 @@ enum class MemoryCallerRole {
  * - Retrieval top-K candidate search = 20 candidates
  */
 class MemoryManager(
-    private val storage: EncryptedMemoryStorage = EncryptedMemoryStorage(),
+    private val storage: MemoryStorage,
+    private val appLockAccess: AppLockAccess,
     // PROVISIONAL - pending GEN-PERF-1: Storage record ceiling = 20,000 records
     val maxRecordCeiling: Int = 20_000,
     // PROVISIONAL - pending GEN-PERF-1: Candidate top-K default = 20
@@ -35,6 +37,9 @@ class MemoryManager(
 ) {
     // GEN-MEM-1: Session Memory (in-RAM only, wipes upon teardown)
     private val sessionMemory = CopyOnWriteArrayList<SessionMemoryEntry>()
+
+    /** Shared Room database used by durable memory and append-only audit repositories. */
+    internal val database get() = storage.database
 
     // ------------------------------------------------------------------------
     // GEN-MEM-6: Access Control Policies
@@ -45,6 +50,12 @@ class MemoryManager(
             AgentLogger.e("MemoryManager", "Access violation: Direct memory $op denied for UNAUTHORIZED_SKILL")
             throw SecurityException("Direct memory $op strictly prohibited for unauthorized skills. Access must route through Memory Manager API with authorized role.")
         }
+        val unlocked = try {
+            appLockAccess.isAppUnlocked()
+        } catch (_: Exception) {
+            false
+        }
+        if (!unlocked) throw SecurityException("App Lock is locked; memory access denied")
     }
 
     // ------------------------------------------------------------------------
@@ -69,6 +80,11 @@ class MemoryManager(
 
     fun clearSession(callerRole: MemoryCallerRole) {
         verifyAccess(callerRole, isWrite = true)
+        sessionMemory.clear()
+    }
+
+    /** Internal Panic Reset hook: only the reset coordinator may wipe RAM after locking the app. */
+    internal fun clearSessionForPanicReset() {
         sessionMemory.clear()
     }
 
@@ -149,8 +165,4 @@ class MemoryManager(
         storage.markEntriesUsed(ids)
     }
 
-    fun executeDatabaseMigration(targetVersion: Int, callerRole: MemoryCallerRole): MigrationReport {
-        verifyAccess(callerRole, isWrite = true)
-        return storage.executeSafeMigration(targetVersion)
-    }
 }

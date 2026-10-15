@@ -1,5 +1,6 @@
 package runtime
 
+import inference.HardwareBenchmarkWorkEnqueuer
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -8,6 +9,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import runtime.di.AgentContainer
+import safety.SafetyGuard
 
 class RuntimeInfrastructureTest {
 
@@ -33,6 +35,20 @@ class RuntimeInfrastructureTest {
 
         assertTrue(results.all { it is AppInitializer.InitStepResult.Success })
         assertEquals(AgentState.IDLE, RuntimeStateManager.currentState.value)
+    }
+
+    @Test
+    fun appInitializerOnlyEnqueuesDeferredHardwareWork() {
+        var enqueueCalls = 0
+        val initializer = AppInitializer(
+            safetyGuard = SafetyGuard(),
+            hardwareBenchmarkWorkEnqueuer = HardwareBenchmarkWorkEnqueuer { enqueueCalls++ }
+        )
+
+        val results = initializer.initialize()
+
+        assertEquals(1, enqueueCalls)
+        assertTrue(results.any { it == AppInitializer.InitStepResult.Success("HardwareBenchmarkWorkEnqueue") })
     }
 
     // GEN-NS-1 NervousSystem Conflated vs Lossless Buffered Channels Test

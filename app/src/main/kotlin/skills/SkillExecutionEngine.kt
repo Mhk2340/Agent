@@ -5,6 +5,7 @@ import safety.RiskLevel
 import safety.SafetyGuard
 import runtime.AgentLogger
 import runtime.Identity
+import security.AppLockAccess
 
 /**
  * GEN-328 — Skill Execution Engine
@@ -21,13 +22,54 @@ import runtime.Identity
 class SkillExecutionEngine(
     val safetyGuard: SafetyGuard,
     val auditLog: ActionAuditLog,
+    private val appLockAccess: AppLockAccess,
     val simulator: ActionSimulator = ActionSimulator(safetyGuard),
     val promptGenerator: ConfirmationPromptGenerator = ConfirmationPromptGenerator(),
     val rateLimiter: ActionRateLimiter = ActionRateLimiter(),
-    private val clock: () -> Long = { System.currentTimeMillis() }
+    private val clock: () -> Long = { System.currentTimeMillis() },
+    private val securityEpochProvider: (() -> Long)? = null,
+    private val isSecurityLockdownActive: () -> Boolean = { false }
 ) {
     // Registry of actual executable skill handlers
     private val handlers = mutableMapOf<String, (Map<String, String>) -> String>()
+
+    private fun lockdownFailure(request: SkillExecutionRequest, reason: String) = SkillExecutionResult(
+        actionId = request.actionId,
+        skillName = request.skillName,
+        status = ExecutionStatus.FAILED,
+        output = null,
+        failureReason = reason,
+        executionCostMs = 0L
+    )
+
+    private fun isLockedFailClosed(): Boolean = try {
+        isSecurityLockdownActive()
+    } catch (_: Exception) {
+        true
+    }
+
+    private fun isAppLockLockedFailClosed(): Boolean = try {
+        !appLockAccess.isAppUnlocked()
+    } catch (_: Exception) {
+        true
+    }
+
+    private fun securityEpochFailure(request: SkillExecutionRequest, riskLevel: RiskLevel): String? {
+        val epochReader = securityEpochProvider ?: return null
+        val currentEpoch = try {
+            epochReader()
+        } catch (_: Exception) {
+            return "Security epoch unavailable; action rejected"
+        }
+        val key = request.idempotencyKey
+        if (riskLevel != RiskLevel.LEVEL_1 && key == null) {
+            return "Epoch-bound idempotency key required; action rejected"
+        }
+        if (key != null && !EpochBoundIdempotencyKey.belongsToEpoch(key, currentEpoch)) {
+            return "Idempotency key is invalid for the current reset epoch; action rejected"
+        }
+        return null
+    }
 
     fun registerHandler(skillName: String, handler: (Map<String, String>) -> String) {
         handlers[skillName] = handler
@@ -39,9 +81,18 @@ class SkillExecutionEngine(
     fun executeSkill(request: SkillExecutionRequest): SkillExecutionResult {
         val startTime = clock()
         val auditId = Identity.nextId("aud")
+        if (isAppLockLockedFailClosed()) {
+            return lockdownFailure(request, "App Lock is locked; action rejected")
+        }
+        if (isLockedFailClosed()) {
+            return lockdownFailure(request, "Agent security lockdown is active; action rejected")
+        }
 
         // 1. Dry-run Simulation (GEN-350) - Mandatory for ALL risk levels
         val simulation = simulator.simulate(request)
+        securityEpochFailure(request, simulation.resolvedRiskLevel)?.let { reason ->
+            return lockdownFailure(request, reason)
+        }
 
         // 2. Idempotency Key Check (Reservation Pattern for Level 2/3)
         if (request.idempotencyKey != null && simulation.resolvedRiskLevel != RiskLevel.LEVEL_1) {
@@ -188,6 +239,18 @@ class SkillExecutionEngine(
                 failureReason = reason,
                 executionCostMs = cost
             )
+        }
+
+        // Recheck immediately before the irreversible bridge; App Lock or reset may have changed
+        // while the guard/rate/audit stages were running.
+        if (isAppLockLockedFailClosed()) {
+            return lockdownFailure(request, "App Lock is locked; action rejected")
+        }
+        if (isLockedFailClosed()) {
+            return lockdownFailure(request, "Agent security lockdown is active; action rejected")
+        }
+        securityEpochFailure(request, simulation.resolvedRiskLevel)?.let { reason ->
+            return lockdownFailure(request, reason)
         }
 
         // 5. Execution Bridge Invocation

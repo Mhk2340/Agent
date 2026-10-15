@@ -1,78 +1,107 @@
 package security
 
-import memory.EncryptedMemoryStorage
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
+import memory.AesGcmCipher
 import memory.MemoryCallerRole
-import memory.MemoryManager
-import memory.StandardKeystoreKeyProvider
+import multiagent.JobStatus
 import reasoning.ContextManager
 import reasoning.ContextRetrievalSource
-import reliability.AgentOperatingModeManager
 import reliability.OperatingMode
-import skills.ActionRateLimiter
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.After
 import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import persistence.AgentDatabase
+import testutil.RoomTestEnvironment
+import testutil.TestOnlyIntegrityMacKeyProvider
+import testutil.TestOnlyKeystoreKeyProvider
 
+@RunWith(RobolectricTestRunner::class)
 class PhaseXiiiSecuritySystemTest {
 
-    private lateinit var memoryStorage: EncryptedMemoryStorage
-    private lateinit var memoryManager: MemoryManager
-    private lateinit var secretManager: SecretManager
-    private lateinit var epochStore: SecurityEpochStore
-    private lateinit var rateLimiter: ActionRateLimiter
-    private lateinit var appLockManager: AppLockManager
-    private lateinit var phaseXVIHooks: DefaultPanicResetPhaseXVIHooks
-    private var configStoreResetCalled = false
-    private lateinit var configResetHook: ConfigStoreResetHook
-    private lateinit var realEnforcer: RealSecurityLockdownEnforcer
-    private lateinit var modeManager: AgentOperatingModeManager
+    private lateinit var context: Context
+    private lateinit var database: AgentDatabase
+    private lateinit var testKeys: TestOnlyKeystoreKeyProvider
+    private lateinit var macKeyProvider: TestOnlyIntegrityMacKeyProvider
+    private lateinit var container: runtime.di.AgentContainer
+    private lateinit var epochPreferencesName: String
+    private lateinit var epochIntegrityAlias: String
+    private lateinit var lockdownPreferencesName: String
+    private lateinit var lockdownIntegrityAlias: String
+    private var benchmarkWorkCancelCount = 0
 
     @Before
     fun setup() {
-        memoryStorage = EncryptedMemoryStorage()
-        memoryManager = MemoryManager(storage = memoryStorage)
-        secretManager = KeystoreSecretManager()
-        epochStore = InMemorySecurityEpochStore(initialEpoch = 1L)
-        rateLimiter = ActionRateLimiter(maxLevel3ActionsPerHour = 3)
-        appLockManager = AppLockManager(backgroundLockTimeoutMs = 1000L) // 1 second for test
-        phaseXVIHooks = DefaultPanicResetPhaseXVIHooks()
-        configStoreResetCalled = false
-        configResetHook = object : ConfigStoreResetHook {
-            override fun resetConfigStoreToSeedDefaults() {
-                configStoreResetCalled = true
+        context = ApplicationProvider.getApplicationContext()
+        testKeys = TestOnlyKeystoreKeyProvider()
+        macKeyProvider = TestOnlyIntegrityMacKeyProvider()
+        val memoryCipher = AesGcmCipher(testKeys, AesGcmCipher.DEFAULT_DATABASE_KEY_ALIAS)
+        database = RoomTestEnvironment.inMemoryDatabase(context, memoryCipher)
+
+        val suffix = java.util.UUID.randomUUID().toString()
+        epochPreferencesName = "phase-xiii-security-epoch-$suffix"
+        epochIntegrityAlias = "phase-xiii-epoch-hmac-$suffix"
+        lockdownPreferencesName = "phase-xiii-panic-lock-$suffix"
+        lockdownIntegrityAlias = "phase-xiii-panic-lock-hmac-$suffix"
+        context.getSharedPreferences("agent_policy_config", Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        benchmarkWorkCancelCount = 0
+
+        container = runtime.di.AgentContainer(
+            applicationContext = context,
+            databaseOverride = database,
+            keystoreKeyProviderOverride = testKeys,
+            securityEpochStoreOverride = AndroidSecurityEpochStore(
+                context,
+                macKeyProvider,
+                epochPreferencesName,
+                epochIntegrityAlias
+            ),
+            panicResetLockdownStoreOverride = AndroidPanicResetLockdownStore(
+                context,
+                macKeyProvider,
+                lockdownPreferencesName,
+                lockdownIntegrityAlias
+            ),
+            benchmarkWorkCancellerOverride = inference.PanicResetBenchmarkWorkCanceller {
+                benchmarkWorkCancelCount++
             }
-        }
-
-        realEnforcer = RealSecurityLockdownEnforcer(
-            memoryManager = memoryManager,
-            memoryStorage = memoryStorage,
-            secretManager = secretManager,
-            epochStore = epochStore,
-            rateLimiter = rateLimiter,
-            appLockManager = appLockManager,
-            phaseXVIHooks = phaseXVIHooks,
-            configStoreResetHook = configResetHook
         )
-
-        modeManager = AgentOperatingModeManager(
-            securityLockdownEnforcer = realEnforcer
+        container.setAppLockStateStoreForTest(InMemoryAppLockStateStore())
+        assertEquals(
+            AppLockOperationResult.Success,
+            container.appLockManager.configurePin("123456".toCharArray(), "123456".toCharArray())
         )
+    }
+
+    @After
+    fun tearDown() {
+        database.close()
+        testKeys.clearAllKeysForTest()
+        macKeyProvider.clearForTest()
+        context.getSharedPreferences(epochPreferencesName, Context.MODE_PRIVATE).edit().clear().commit()
+        context.getSharedPreferences(lockdownPreferencesName, Context.MODE_PRIVATE).edit().clear().commit()
+        context.getSharedPreferences("agent_policy_config", Context.MODE_PRIVATE).edit().clear().commit()
     }
 
     // 1. Integration of GEN-MODE-1 with RealSecurityLockdownEnforcer
     @Test
     fun testModeManagerSecurityLockdownWithRealEnforcer() {
+        val modeManager = container.operatingModeManager
+        val realEnforcer = container.securityLockdownEnforcer
         assertEquals(OperatingMode.NORMAL, modeManager.getCurrentMode())
         assertFalse(realEnforcer.isMemoryReadOnly())
         assertTrue(realEnforcer.areMutatingToolsAllowed())
         assertTrue(realEnforcer.isExternalNetworkAllowed())
 
-        // Transition to SECURITY_LOCKDOWN activates real security lockdown
+        // Transition to SECURITY_LOCKDOWN activates the production container's real enforcer.
         modeManager.transitionTo(OperatingMode.SECURITY_LOCKDOWN, "High severity security anomaly detected")
 
         assertEquals(OperatingMode.SECURITY_LOCKDOWN, modeManager.getCurrentMode())
@@ -80,14 +109,12 @@ class PhaseXiiiSecuritySystemTest {
         assertFalse(realEnforcer.areMutatingToolsAllowed())
         assertFalse(realEnforcer.isExternalNetworkAllowed())
 
-        // Verify operating mode constraints mirror the real enforcer
         val constraints = modeManager.getConstraints()
         assertTrue(constraints.isMemoryReadOnly)
         assertFalse(constraints.allowLevel2Actions)
         assertFalse(constraints.allowLevel3Actions)
         assertFalse(constraints.allowExternalNetwork)
 
-        // De-escalate back to NORMAL
         modeManager.transitionTo(OperatingMode.NORMAL, "Threat neutralized")
         assertFalse(realEnforcer.isMemoryReadOnly())
         assertTrue(realEnforcer.areMutatingToolsAllowed())
@@ -119,34 +146,37 @@ class PhaseXiiiSecuritySystemTest {
     // 3. GEN-SEC-2 App-Level Lock
     @Test
     fun testAppLevelLockLifecycleAndTimeout() {
-        val lockManager = AppLockManager(backgroundLockTimeoutMs = 50L) // 50ms timeout
-        // Initial setup
-        lockManager.setPin("1234")
+        var now = 10_000L
+        val lockManager = AppLockManager(InMemoryAppLockStateStore(), clock = { now })
+        assertFalse(lockManager.isAppUnlocked())
+        assertEquals(
+            AppLockOperationResult.Success,
+            lockManager.configurePin("123456".toCharArray(), "123456".toCharArray())
+        )
         assertTrue(lockManager.isAppUnlocked())
+        assertEquals(AppLockOperationResult.Success, lockManager.setBackgroundTimeout(50L))
 
-        // Manual lock
         lockManager.lock()
         assertFalse(lockManager.isAppUnlocked())
-
-        // Invalid pin fails
-        assertFalse(lockManager.unlockWithPin("0000"))
+        assertEquals(AppLockOperationResult.IncorrectPin, lockManager.unlockWithPin("000000".toCharArray()))
         assertFalse(lockManager.isAppUnlocked())
-
-        // Correct pin unlocks
-        assertTrue(lockManager.unlockWithPin("1234"))
+        assertEquals(AppLockOperationResult.Success, lockManager.unlockWithPin("123456".toCharArray()))
         assertTrue(lockManager.isAppUnlocked())
 
-        // Background timeout triggers lock
         lockManager.onAppMovedToBackground()
-        Thread.sleep(60L) // Wait past 50ms
+        now += 51L
         lockManager.onAppMovedToForeground()
         assertFalse(lockManager.isAppUnlocked())
     }
 
-    // 4. GEN-SEC-3 Panic Reset: Data destruction, epoch increment, rate limiter quota consumption, Phase XVI hooks, Config Reset
+    // 4. GEN-SEC-3: exercise reset only through the production AgentContainer wiring.
     @Test
     fun testPanicResetExecutionAndInvariants() {
-        // Populate memory and secrets
+        val memoryManager = container.memoryManager
+        val secretManager = container.secretManager
+        val workspaceManager = container.sharedWorkspaceManager
+        val jobManager = container.asyncJobManager
+
         memoryManager.saveLongTermMemory(
             memoryType = memory.MemoryType.SEMANTIC,
             content = "Sensitive user information",
@@ -155,52 +185,57 @@ class PhaseXiiiSecuritySystemTest {
         )
         memoryManager.appendSessionMessage("user", "my secret token", MemoryCallerRole.SYSTEM_CORE)
         secretManager.storeSecret("gemini_key", "secret-token-12345")
+        val job = jobManager.submitJob("job-reset", "Sensitive task", "private prompt")
+        jobManager.startNextJob()
+        workspaceManager.saveRoleOutput(job.jobId, "worker", "private artifact")
+
+        container.agentPolicyConfigStore.setRiskLevelOverride("policy-only", 3)
+        container.agentPolicyConfigStore.setMaxLevel3ActionsPerHour(3)
+        container.safetyGuard.riskRegistry.registerSkillRisk("guard-preserved", safety.RiskLevel.LEVEL_2)
+        val guardRiskBefore = container.safetyGuard.riskRegistry.getEffectiveRiskLevel("guard-preserved")
 
         assertEquals(1, memoryManager.getTotalCount(MemoryCallerRole.SYSTEM_CORE))
         assertEquals(1, memoryManager.getSessionMessages(MemoryCallerRole.SYSTEM_CORE).size)
         assertEquals("secret-token-12345", secretManager.getSecret("gemini_key"))
-        assertEquals(1L, epochStore.getCurrentEpoch())
-        assertFalse(configStoreResetCalled)
+        assertEquals(1, workspaceManager.getArtifactsForJob(job.jobId).size)
+        assertEquals(1L, container.securityEpochStore.getCurrentEpoch())
+        assertEquals(0, container.actionRateLimiter.getUsageCount())
+        assertTrue(container.appLockManager.isAppUnlocked())
 
-        // Initial rate limiter usage is 0
-        assertEquals(0, rateLimiter.getUsageCount())
+        val newEpoch = container.executePanicReset("Device stolen signal")
 
-        // Execute Panic Reset
-        val newEpoch = realEnforcer.executePanicReset("Device stolen signal")
         assertEquals(2L, newEpoch)
-        assertEquals(2L, epochStore.getCurrentEpoch())
-
-        // 1. Secrets completely destroyed
+        assertEquals(2L, container.securityEpochStore.getCurrentEpoch())
         assertNull(secretManager.getSecret("gemini_key"))
         assertTrue(secretManager.listSecretAliases().isEmpty())
-
-        // 2. Session memory cleared
+        assertFalse(container.appLockManager.isAppUnlocked())
+        assertEquals(
+            AppLockOperationResult.Success,
+            container.appLockManager.unlockWithPin("123456".toCharArray())
+        )
         assertTrue(memoryManager.getSessionMessages(MemoryCallerRole.SYSTEM_CORE).isEmpty())
+        assertEquals(0, memoryManager.getTotalCount(MemoryCallerRole.SYSTEM_CORE))
+        container.appLockManager.lock()
+        assertEquals(1, container.actionRateLimiter.getUsageCount())
+        assertEquals(5, container.actionRateLimiter.maxLevel3ActionsPerHour)
+        assertEquals(AgentPolicyConfig(), container.agentPolicyConfigStore.snapshot())
+        assertEquals(guardRiskBefore, container.safetyGuard.riskRegistry.getEffectiveRiskLevel("guard-preserved"))
+        assertEquals(JobStatus.CANCELLED, job.status)
+        assertTrue(workspaceManager.getArtifactsForJob(job.jobId).isEmpty())
+        assertEquals(1, benchmarkWorkCancelCount)
+        assertFalse(container.appLockManager.isAppUnlocked())
+        assertTrue(container.securityLockdownEnforcer.isPanicResetLatched())
 
-        // 3. Rate limiter consumed 1 unit (GEN-NEW-RATE invariant: Panic Reset consumes from rate limit)
-        assertEquals(1, rateLimiter.getUsageCount())
-
-        // 4. Long-term memory only has the mandatory Genesis Record
-        assertEquals(1, memoryManager.getTotalCount(MemoryCallerRole.SYSTEM_CORE))
-        val activeEntries = memoryStorage.getAllActiveEntries()
-        assertEquals(1, activeEntries.size)
-        assertTrue(activeEntries[0].content.contains("[GENESIS_RECORD] Panic Reset executed"))
-        assertTrue(activeEntries[0].content.contains("epoch=2"))
-
-        // 5. Config Store reset to strict seed defaults was executed
-        assertTrue(configStoreResetCalled)
-
-        // 6. Phase XVI hooks were invoked: Workspace purged and jobs cancelled
-        assertTrue(phaseXVIHooks.wasWorkspacePurged())
-
-        // 7. App is locked
-        assertFalse(appLockManager.isAppUnlocked())
+        val genesis = container.actionAuditLog.getPanicResetGenesisRecords().single()
+        assertEquals("GENESIS", genesis.executionStatus)
+        assertEquals("Reset at ${genesis.timestamp}, epoch=2, prior history unreadable", genesis.output)
+        assertTrue(container.actionAuditLog.getAllRecords().single { it.executionStatus == "GENESIS" } == genesis)
     }
 
     // 5. GEN-579/580 Isolated Secret Management
     @Test
     fun testSecretManagerCredentialIsolation() {
-        val vault = KeystoreSecretManager()
+        val vault = container.secretManager
         vault.storeSecret("groq_key", "key-groq-99")
         vault.storeSecret("openrouter_key", "key-openrouter-88")
 
@@ -216,18 +251,21 @@ class PhaseXiiiSecuritySystemTest {
         assertNull(vault.getSecret("openrouter_key"))
     }
 
-    // 6. Rate Limit Protection on Panic Reset
+    // 6. An exhausted quota is not reset; later cleanup still runs and lockdown stays latched.
     @Test
     fun testPanicResetBlockedWhenRateLimitExceeded() {
-        // Rate limiter allows 3 Level-3 actions per hour
-        rateLimiter.checkAndRecord(safety.RiskLevel.LEVEL_3)
-        rateLimiter.checkAndRecord(safety.RiskLevel.LEVEL_3)
-        rateLimiter.checkAndRecord(safety.RiskLevel.LEVEL_3)
+        container.agentPolicyConfigStore.setMaxLevel3ActionsPerHour(3)
+        repeat(3) { container.actionRateLimiter.checkAndRecord(safety.RiskLevel.LEVEL_3) }
 
-        // 4th Level-3 action (Panic Reset) must be rejected
-        val exception = assertThrows(IllegalStateException::class.java) {
-            realEnforcer.executePanicReset("Abuse pattern attempt")
+        val exception = assertThrows(PanicResetIncompleteException::class.java) {
+            container.executePanicReset("Abuse pattern attempt")
         }
-        assertTrue(exception.message!!.contains("Panic Reset rejected by Action Rate Limiter"))
+        assertTrue(exception.failedStages.contains("level-3-budget"))
+        assertNull(exception.cause)
+        assertTrue(container.securityLockdownEnforcer.isPanicResetLatched())
+        assertEquals(2L, container.securityEpochStore.getCurrentEpoch())
+        assertTrue(container.actionAuditLog.getPanicResetGenesisRecords().single().output!!.contains("epoch=2"))
+        assertEquals(3, container.actionRateLimiter.getUsageCount())
+        assertEquals(AgentPolicyConfig(), container.agentPolicyConfigStore.snapshot())
     }
 }
