@@ -1,6 +1,7 @@
 package com.mhk2340.agent
 
 import android.app.Activity
+import android.content.Intent
 import android.hardware.biometrics.BiometricPrompt
 import android.os.Bundle
 import android.os.CancellationSignal
@@ -12,6 +13,7 @@ import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import inference.ModelAssetStore
 import runtime.RuntimeStateManager
 import security.AppLockStatus
 import security.LockdownCondition
@@ -30,8 +32,16 @@ class MainActivity : Activity() {
     private lateinit var viewModel: SecurityViewModel
     private lateinit var screenContainer: FrameLayout
     private lateinit var securityWorker: ExecutorService
+    private lateinit var modelImportWorker: ExecutorService
     private val actionInFlight = AtomicBoolean(false)
+    private val modelImportInFlight = AtomicBoolean(false)
+    private var modelImportStatusOverride: Int? = null
     private var lastRenderedState: SecurityUiState? = null
+
+    private companion object {
+        // PROVISIONAL - pending GEN-PERF-1
+        const val MODEL_IMPORT_REQUEST_CODE = 0x4d49
+    }
 
     private val timeoutOptionsMs = longArrayOf(
         0L,
@@ -60,6 +70,9 @@ class MainActivity : Activity() {
         securityWorker = Executors.newSingleThreadExecutor { task ->
             Thread(task, "security-ui-worker").apply { isDaemon = true }
         }
+        modelImportWorker = Executors.newSingleThreadExecutor { task ->
+            Thread(task, "model-import-worker").apply { isDaemon = true }
+        }
         dispatch { it.state() }
     }
 
@@ -78,6 +91,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         clearSensitiveInputs()
         if (::securityWorker.isInitialized) securityWorker.shutdown()
+        if (::modelImportWorker.isInitialized) modelImportWorker.shutdownNow()
         super.onDestroy()
     }
 
@@ -217,6 +231,22 @@ class MainActivity : Activity() {
 
     private fun renderSettings(screen: View, state: SecurityUiState.Settings) {
         showMessage(screen.findViewById(R.id.screen_message), state.message)
+        val container = (application as AgentApplication).agentContainer
+        if (modelImportStatusOverride == R.string.model_import_auth_required && container.appLockManager.isAppUnlocked()) {
+            modelImportStatusOverride = null
+        }
+        val modelStore = container.localModelAssetStore
+        val modelStatus = modelImportStatusOverride ?: when {
+            modelImportInFlight.get() -> R.string.model_import_status_importing
+            modelStore.isInstalled() -> R.string.model_import_status_ready
+            else -> R.string.model_import_status_missing
+        }
+        screen.findViewById<TextView>(R.id.model_import_status).setText(modelStatus)
+        screen.findViewById<View>(R.id.settings_model_import_button).apply {
+            isEnabled = !modelImportInFlight.get()
+            setOnClickListener { openModelDocumentPicker() }
+        }
+
         val geminiSaved = security.ProviderCredentialCatalog.GEMINI_FREE in state.configuredProviderIds
         val groqSaved = security.ProviderCredentialCatalog.GROQ_FREE in state.configuredProviderIds
         screen.findViewById<TextView>(R.id.gemini_status).setText(
@@ -271,6 +301,87 @@ class MainActivity : Activity() {
         screen.findViewById<View>(R.id.settings_lock_button).setOnClickListener {
             dispatch { it.lockNow() }
         }
+    }
+
+    private fun openModelDocumentPicker() {
+        val container = (application as AgentApplication).agentContainer
+        if (!container.appLockManager.isAppUnlocked()) {
+            modelImportStatusOverride = R.string.model_import_auth_required
+            updateModelImportStatus(modelImportStatusOverride!!)
+            dispatch { it.state() }
+            return
+        }
+
+        modelImportStatusOverride = null
+        val picker = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            startActivityForResult(picker, MODEL_IMPORT_REQUEST_CODE)
+        } catch (_: Exception) {
+            modelImportStatusOverride = R.string.model_import_picker_unavailable
+            updateModelImportStatus(modelImportStatusOverride!!)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != MODEL_IMPORT_REQUEST_CODE || resultCode != Activity.RESULT_OK) return
+        val uri = data?.data ?: return
+        val container = (application as AgentApplication).agentContainer
+        if (!container.appLockManager.isAppUnlocked()) {
+            modelImportStatusOverride = R.string.model_import_auth_required
+            dispatch { it.state() }
+            return
+        }
+        if (!modelImportInFlight.compareAndSet(false, true)) return
+
+        modelImportStatusOverride = R.string.model_import_status_importing
+        updateModelImportStatus(modelImportStatusOverride!!)
+        try {
+            modelImportWorker.execute {
+                val result = try {
+                    contentResolver.openInputStream(uri)?.use(container.localModelAssetStore::importModel)
+                        ?: ModelAssetStore.ImportResult.Failed("The selected document could not be opened")
+                } catch (error: Exception) {
+                    ModelAssetStore.ImportResult.Failed(error.message ?: error.javaClass.simpleName)
+                }
+                runOnUiThread {
+                    modelImportInFlight.set(false)
+                    val status = when (result) {
+                        is ModelAssetStore.ImportResult.Installed,
+                        ModelAssetStore.ImportResult.AlreadyInstalled -> R.string.model_import_status_ready
+                        is ModelAssetStore.ImportResult.IntegrityFailure -> R.string.model_import_status_mismatch
+                        is ModelAssetStore.ImportResult.Failed -> R.string.model_import_status_failed
+                    }
+                    modelImportStatusOverride = status
+                    if (!isFinishing && !isDestroyed && lastRenderedState is SecurityUiState.Settings &&
+                        container.appLockManager.isAppUnlocked()
+                    ) {
+                        updateModelImportStatus(status)
+                        if (result is ModelAssetStore.ImportResult.IntegrityFailure ||
+                            result is ModelAssetStore.ImportResult.Failed
+                        ) {
+                            Toast.makeText(this, status, Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            }
+        } catch (_: RejectedExecutionException) {
+            modelImportInFlight.set(false)
+            modelImportStatusOverride = R.string.model_import_status_failed
+            updateModelImportStatus(modelImportStatusOverride!!)
+        }
+    }
+
+    private fun updateModelImportStatus(resourceId: Int) {
+        if (!::screenContainer.isInitialized) return
+        screenContainer.findViewById<TextView>(R.id.model_import_status)?.setText(resourceId)
+        screenContainer.findViewById<View>(R.id.settings_model_import_button)?.isEnabled =
+            !modelImportInFlight.get()
     }
 
     private fun attachCredentialSave(screen: View, inputId: Int, buttonId: Int, providerName: String) {

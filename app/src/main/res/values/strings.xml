@@ -35,6 +35,16 @@
     <string name="back_button">Back</string>
     <string name="settings_title">Security settings</string>
     <string name="settings_description">Saved keys are never shown. Enter a new value to replace a key.</string>
+    <string name="model_import_title">Local model</string>
+    <string name="model_import_description">Choose the Qwen3 4B GGUF Q4_K_M file. It is copied to private app storage and accepted only if its SHA‑256 matches the pinned model. The app does not download it.</string>
+    <string name="model_import_status_missing">No verified local model is installed.</string>
+    <string name="model_import_status_ready">Verified Qwen3 model is installed in private app storage.</string>
+    <string name="model_import_status_importing">Copying and verifying the selected model…</string>
+    <string name="model_import_status_mismatch">The selected file did not match the pinned SHA‑256. No unverified file was installed.</string>
+    <string name="model_import_status_failed">Model import failed. No unverified file was installed.</string>
+    <string name="model_import_button">Choose model file</string>
+    <string name="model_import_picker_unavailable">A document picker is not available on this device.</string>
+    <string name="model_import_auth_required">Unlock the app before importing a model.</string>
     <string name="provider_gemini">Gemini Free provider</string>
     <string name="provider_groq">Groq Free provider</string>
     <string name="credential_saved">Key saved</string>

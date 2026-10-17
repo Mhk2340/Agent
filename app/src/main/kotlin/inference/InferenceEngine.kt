@@ -1,18 +1,16 @@
 package inference
 
-import contracts.GenerateParams
 import contracts.InferenceError
 import contracts.InferenceProvider
 import contracts.InferenceRequest
 import contracts.InferenceResponse
 import contracts.ProviderCapabilities
 import contracts.ProviderType
-import contracts.TokenUsage
 import java.util.concurrent.ConcurrentHashMap
 
 /**
  * GEN-271 & GEN-278 — Model Abstraction Layer & Inference Engine Implementation.
- * The backend remains injected; no native inference dependency is bundled here.
+ * Production may inject the pinned CPU JNI backend; JVM tests continue to inject deterministic fakes.
  */
 class LocalInferenceEngine(
     private val budgetPolicy: ContextWindowBudgetPolicy = ContextWindowBudgetPolicy(),
@@ -26,7 +24,10 @@ class LocalInferenceEngine(
     private val modeDelegateOverride: () -> HardwareDelegate? = { null },
     private val onMemoryPressureFallback: () -> Unit = {},
     private val diagnostics: BenchmarkDiagnosticsStore? = null,
-    private val clock: () -> Long = System::currentTimeMillis
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val supportsStreaming: Boolean = true,
+    private val supportsSeed: Boolean = true,
+    private val supportsCancellation: Boolean = true
 ) : InferenceProvider {
 
     // A transient canary warning keeps this engine/session on CPU without creating a durable lock.
@@ -41,10 +42,10 @@ class LocalInferenceEngine(
         // PROVISIONAL - pending GEN-PERF-1: max 4096 tokens
         max_context_tokens = budgetPolicy.maxContextTokens,
         max_output_tokens = 512,
-        supports_streaming = true,
+        supports_streaming = supportsStreaming,
         supports_structured_output = true,
-        supports_seed = true,
-        supports_cancellation = true
+        supports_seed = supportsSeed,
+        supports_cancellation = supportsCancellation
     )
 
     override fun generate(request: InferenceRequest): Result<InferenceResponse> {
@@ -66,13 +67,9 @@ class LocalInferenceEngine(
         if (backendExecutor != null) return backendExecutor.invoke(request)
         if (delegateBackendExecutor != null) return executeWithDelegateSafety(request)
 
-        // Honest current-app placeholder: a deterministic response stub, not a real model runtime.
-        return Result.success(
-            InferenceResponse(
-                text = "{\"intent\": \"default_response\", \"confidence\": 0.9}",
-                usage = TokenUsage(prompt_tokens = estimatedContextTokens, completion_tokens = 20),
-                finish_reason = "stop"
-            )
+        // No model is silently fabricated when the production CPU backend is absent or not configured.
+        return Result.failure(
+            AgentModelException(InferenceError.Unavailable("No local inference backend is configured"))
         )
     }
 

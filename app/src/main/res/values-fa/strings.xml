@@ -35,6 +35,16 @@
     <string name="back_button">بازگشت</string>
     <string name="settings_title">تنظیمات امنیت</string>
     <string name="settings_description">کلیدهای ذخیره‌شده هرگز نمایش داده نمی‌شوند. برای جایگزینی، مقدار تازه‌ای وارد کنید.</string>
+    <string name="model_import_title">مدل محلی</string>
+    <string name="model_import_description">فایل Qwen3 4B GGUF Q4_K_M را انتخاب کنید. فایل در فضای خصوصی برنامه کپی می‌شود و فقط در صورت تطبیق SHA‑256 پذیرفته خواهد شد. برنامه آن را دانلود نمی‌کند.</string>
+    <string name="model_import_status_missing">مدل محلی تأییدشده‌ای نصب نشده است.</string>
+    <string name="model_import_status_ready">مدل Qwen3 تأییدشده در فضای خصوصی برنامه نصب است.</string>
+    <string name="model_import_status_importing">در حال کپی و بررسی مدل انتخاب‌شده…</string>
+    <string name="model_import_status_mismatch">SHA‑256 فایل انتخاب‌شده با مقدار ثابت مدل تطبیق نداشت. هیچ فایل تأییدنشده‌ای نصب نشد.</string>
+    <string name="model_import_status_failed">واردکردن مدل ناموفق بود. هیچ فایل تأییدنشده‌ای نصب نشد.</string>
+    <string name="model_import_button">انتخاب فایل مدل</string>
+    <string name="model_import_picker_unavailable">انتخاب‌گر سند در این دستگاه در دسترس نیست.</string>
+    <string name="model_import_auth_required">پیش از واردکردن مدل، قفل برنامه را باز کنید.</string>
     <string name="provider_gemini">ارائه‌دهندهٔ Gemini Free</string>
     <string name="provider_groq">ارائه‌دهندهٔ Groq Free</string>
     <string name="credential_saved">کلید ذخیره شده</string>

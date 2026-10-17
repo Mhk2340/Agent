@@ -105,6 +105,39 @@
         android:layout_marginTop="2dp"
         android:text="@string/remove_key_button" />
 
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:text="@string/model_import_title"
+        android:textColor="@color/agent_text"
+        android:textSize="17sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="@string/model_import_description"
+        android:textColor="@color/agent_secondary_text"
+        android:textSize="14sp" />
+
+    <TextView
+        android:id="@+id/model_import_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:textColor="@color/agent_secondary_text"
+        android:textSize="13sp" />
+
+    <Button
+        android:id="@+id/settings_model_import_button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="@string/model_import_button" />
+
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

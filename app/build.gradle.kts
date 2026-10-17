@@ -13,6 +13,11 @@ android {
         applicationId = "com.mhk2340.agent"
         minSdk = 28
         targetSdk = 34
+        // The CI-built native library targets arm64 only; there is deliberately no externalNativeBuild block.
+        // PROVISIONAL - pending GEN-PERF-1
+        ndk {
+            abiFilters += setOf("arm64-v8a")
+        }
         versionCode = 1 // PROVISIONAL: placeholder; the roadmap does not define Android release numbering.
         versionName = "1.0" // PROVISIONAL: placeholder; the roadmap does not define an app version name.
     }

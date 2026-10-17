@@ -22,3 +22,6 @@ build/
 .gradle/
 .kotlin/
 local.properties
+
+# The arm64 JNI library is compiled only by the GitHub Actions workflow and uploaded as an artifact.
+app/src/main/jniLibs/

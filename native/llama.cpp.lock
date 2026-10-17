@@ -1,0 +1,14 @@
+# Pinned source and CI-only Android build inputs for the Phase H CPU runtime.
+# The upstream tag is checked against this immutable full commit hash before building.
+LLAMA_CPP_REPOSITORY=https://github.com/ggml-org/llama.cpp
+LLAMA_CPP_TAG=b11669
+LLAMA_CPP_COMMIT=620d2225cc436ab0b001e3200e590e3b286ef9ab
+# Fixed toolchain pins are provisional pending device profiling; they are not benchmark claims.
+# PROVISIONAL - pending GEN-PERF-1
+ANDROID_NDK_VERSION=29.0.14206865
+# PROVISIONAL - pending GEN-PERF-1
+CMAKE_VERSION=3.28.3
+# PROVISIONAL - pending GEN-PERF-1
+ANDROID_PLATFORM=android-28
+# PROVISIONAL - pending GEN-PERF-1
+ANDROID_ABI=arm64-v8a

@@ -6,13 +6,8 @@ import kotlinx.serialization.json.Json
 /**
  * GEN-NEW-E — Structured Output Grammar Constraint
  *
- * PROVISIONAL - pending on-device llama.cpp / MediaPipe GBNF Grammar integration.
- * In a native ARM64 on-device environment with llama.cpp, this constraint is enforced at
- * decoding time (Constrained Sampling via GBNF grammar rules) to structurally prevent invalid tokens.
- *
- * IN CURRENT SANDBOX (x86_64 JVM without native llama.cpp library):
- * 1. Exports GBNF grammar specification & JSON Schema for the native backend.
- * 2. Implements strict schema validation and recovery rejection for model outputs.
+ * The Phase H CPU JNI backend applies the exported GBNF at decoding time for the frozen cognitive-call schema.
+ * JSON parsing remains a defensive post-generation check; unsupported schemas are rejected before JNI.
  */
 object StructuredGrammarConstraint {
 
@@ -22,15 +17,17 @@ object StructuredGrammarConstraint {
      * Canonical GBNF Grammar rule definition for llama.cpp Constrained Decoding
      * Enforces JSON structure at token sampling time.
      */
-    val gbnfGrammarDefinition: String = buildString {
-        append("root ::= \"{\" ws \"\\\"intent\\\":\" ws string \",\" ws \"\\\"goal\\\":\" ws string \",\" ws \"\\\"plan\\\":\" ws array \",\" ws \"\\\"needs_tool\\\":\" ws boolean \",\" ws \"\\\"tool_name\\\":\" ws (string | \"null\") \",\" ws \"\\\"tool_params\\\":\" ws object \",\" ws \"\\\"confidence\\\":\" ws number ws \"}\"\n")
-        append("ws ::= [ \\t\\n\\r]*\n")
-        append("number ::= [0-9]+ (\".\" [0-9]+)?\n")
-        append("boolean ::= \"true\" | \"false\"\n")
-        append("string ::= \"\\\"\" [^\"\\\\]* \"\\\"\"\n")
-        append("array ::= \"[\" ws (string (ws \",\" ws string)*)? ws \"]\"\n")
-        append("object ::= \"{\" ws (string ws \":\" ws string (ws \",\" ws string ws \":\" ws string)*)? ws \"}\"")
-    }
+    // PROVISIONAL - pending GEN-PERF-1
+    val gbnfGrammarDefinition: String = """
+        root ::= "{" ws "\"intent\"" ws ":" ws string "," ws "\"goal\"" ws ":" ws string "," ws "\"plan\"" ws ":" ws array "," ws "\"needs_tool\"" ws ":" ws boolean optional-fields "," ws "\"confidence\"" ws ":" ws number ws "}"
+        optional-fields ::= ("," ws "\"tool_name\"" ws ":" ws (string | "null"))? ("," ws "\"tool_params\"" ws ":" ws object)?
+        ws ::= [ \t\n\r]*
+        boolean ::= "true" | "false"
+        number ::= "-"? ("0" | [1-9] [0-9]*) ("." [0-9]+)? ([eE] [-+]? [0-9]+)?
+        string ::= "\"" ([^"\\\x7F\x00-\x1F] | "\\" (["\\bfnrt] | "u" [0-9a-fA-F]{4}))* "\""
+        array ::= "[" ws (string (ws "," ws string)*)? ws "]"
+        object ::= "{" ws (string ws ":" ws string (ws "," ws string ws ":" ws string)*)? ws "}"
+    """.trimIndent()
 
     /**
      * Canonical JSON Schema representing Contract #3:

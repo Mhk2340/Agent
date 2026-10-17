@@ -8,13 +8,19 @@ import inference.AndroidGpuRuntimeSafetyStore
 import inference.AndroidMemoryPressureSignalProvider
 import inference.BenchmarkDiagnosticsStore
 import inference.BenchmarkStarvationMonitorDependencies
+import inference.ContextWindowBudgetPolicy
+import inference.HardwareDelegate
 import inference.DeviceFingerprintProvider
 import inference.DeviceProfileStore
 import inference.HardwareBenchmarkWorkEnqueuer
 import inference.HardwareBenchmarkWorkScheduler
 import inference.HardwareBenchmarkWorkerDependencies
 import inference.HardwareDelegateSelector
+import inference.InferenceDelegateExecutor
+import inference.InferenceDelegateOutput
+import inference.LlamaCppInferenceBackend
 import inference.LocalInferenceEngine
+import inference.ModelAssetStore
 import inference.PanicResetBenchmarkWorkCanceller
 import inference.ProductionDeviceBenchmarkMeasurement
 import inference.UnconfiguredLocalModelRuntimeIdentitySource
@@ -137,20 +143,45 @@ class AgentContainer(
         HardwareDelegateSelector(deviceProfileStore, gpuRuntimeSafetyStore)
     }
 
-    /** The current backend remains a deterministic stub; this property only wires persisted selection. */
+    /** The verified model stays in app-private, non-backed-up storage and is selected through SAF. */
+    val localModelAssetStore: ModelAssetStore by lazy {
+        val context = checkNotNull(applicationContext) {
+            "AgentContainer needs Context for private local model storage"
+        }
+        ModelAssetStore(java.io.File(context.noBackupFilesDir, "models"))
+    }
+
+    private val localInferenceBudgetPolicy: ContextWindowBudgetPolicy by lazy { ContextWindowBudgetPolicy() }
+
+    private val localLlamaInferenceBackend: LlamaCppInferenceBackend by lazy {
+        LlamaCppInferenceBackend(localModelAssetStore, localInferenceBudgetPolicy.maxContextTokens)
+    }
+
+    /** Production inference is bound to the source-built CPU-only JNI backend; GPU delegates are rejected. */
     val localInferenceEngine: LocalInferenceEngine by lazy {
         val context = checkNotNull(applicationContext) {
             "AgentContainer needs Context for local inference safety signals"
         }
         LocalInferenceEngine(
+            budgetPolicy = localInferenceBudgetPolicy,
             delegateSelector = hardwareDelegateSelector,
             deviceFingerprint = deviceFingerprintProvider.currentFingerprint().stableKey,
             memoryPressureSignalProvider = AndroidMemoryPressureSignalProvider(context),
-            modeDelegateOverride = { operatingModeManager.getConstraints().hardwareDelegateOverride },
+            delegateBackendExecutor = InferenceDelegateExecutor { delegate, request ->
+                if (delegate != HardwareDelegate.CPU) {
+                    Result.failure(IllegalStateException("GPU execution is disabled for the Phase H runtime"))
+                } else {
+                    localLlamaInferenceBackend.generate(request).map { InferenceDelegateOutput(it) }
+                }
+            },
+            modeDelegateOverride = { HardwareDelegate.CPU },
             onMemoryPressureFallback = {
                 operatingModeManager.transitionTo(OperatingMode.LOW_MEMORY, "GEN-EDGE-1 memory-pressure fallback")
             },
-            diagnostics = benchmarkDiagnostics
+            diagnostics = benchmarkDiagnostics,
+            supportsStreaming = false,
+            supportsSeed = false,
+            supportsCancellation = false
         )
     }
 
