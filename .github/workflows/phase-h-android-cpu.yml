@@ -49,6 +49,8 @@ jobs:
 
       - name: Install Android SDK command-line tools
         uses: android-actions/setup-android@v3
+        with:
+          packages: ''
 
       - name: Load pinned toolchain versions
         shell: bash
