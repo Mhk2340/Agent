@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">دستیار اندروید</string>
+    <string name="app_name">ATOM</string>
     <string name="security_intro">دستیار خصوصی شما تا زمان بازکردن قفل، قفل می‌ماند.</string>
     <string name="runtime_status">وضعیت اجرا: %1$s</string>
     <string name="security_title">امنیت</string>
@@ -9,11 +9,11 @@
     <string name="pin_label">رمز (۶ تا ۱۲ رقم)</string>
     <string name="pin_confirm_label">تکرار رمز</string>
     <string name="pin_setup_button">ساخت رمز</string>
-    <string name="pin_entry_title">بازکردن قفل دستیار اندروید</string>
+    <string name="pin_entry_title">بازکردن قفل ATOM</string>
     <string name="pin_entry_description">برای ادامه، رمز برنامه را وارد کنید.</string>
     <string name="pin_unlock_button">بازکردن قفل</string>
     <string name="biometric_unlock_button">استفاده از زیست‌سنجی</string>
-    <string name="biometric_prompt_title">بازکردن قفل دستیار اندروید</string>
+    <string name="biometric_prompt_title">بازکردن قفل ATOM</string>
     <string name="biometric_prompt_description">برای بازکردن قفل برنامه، هویت خود را تأیید کنید.</string>
     <string name="biometric_negative_button">استفاده از رمز</string>
     <string name="biometric_unavailable">احراز هویت زیست‌سنجی در دسترس نیست. از رمز استفاده کنید.</string>
@@ -43,6 +43,19 @@
     <string name="model_import_status_mismatch">SHA‑256 فایل انتخاب‌شده با مقدار ثابت مدل تطبیق نداشت. هیچ فایل تأییدنشده‌ای نصب نشد.</string>
     <string name="model_import_status_failed">واردکردن مدل ناموفق بود. هیچ فایل تأییدنشده‌ای نصب نشد.</string>
     <string name="model_import_button">انتخاب فایل مدل</string>
+    <string name="local_model_self_test_button">اجرای خودآزمایی مدل محلی</string>
+    <string name="local_model_self_test_succeeded">خودآزمایی مدل محلی موفق بود.</string>
+    <string name="local_model_self_test_failed">خودآزمایی مدل محلی ناموفق بود.</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_load_time">زمان بارگذاری مدل — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d ms</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_first_token_time">زمان تا نخستین توکن — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d ms</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_tokens_per_second">توکن بر ثانیه — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$.2f</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_token_count">تعداد توکن تولیدشده — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_peak_memory">اوج PSS فرایند — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d KB</string>
     <string name="model_import_picker_unavailable">انتخاب‌گر سند در این دستگاه در دسترس نیست.</string>
     <string name="model_import_auth_required">پیش از واردکردن مدل، قفل برنامه را باز کنید.</string>
     <string name="provider_gemini">ارائه‌دهندهٔ Gemini Free</string>

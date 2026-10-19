@@ -1,9 +1,26 @@
+import java.io.File
+import java.util.Base64
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("com.google.devtools.ksp")
     kotlin("plugin.serialization")
 }
+
+val atomKeystoreB64 = providers.environmentVariable("ATOM_KEYSTORE_B64").orNull
+val atomKeystorePassword = providers.environmentVariable("ATOM_KEYSTORE_PASSWORD").orNull
+val atomKeyAlias = providers.environmentVariable("ATOM_KEY_ALIAS").orNull
+val atomKeyPassword = providers.environmentVariable("ATOM_KEY_PASSWORD").orNull
+val atomSigningConfigured = listOf(
+    atomKeystoreB64,
+    atomKeystorePassword,
+    atomKeyAlias,
+    atomKeyPassword
+).all { !it.isNullOrBlank() }
+val atomKeystoreTempDirectory = providers.environmentVariable("RUNNER_TEMP").orNull
+    ?: System.getProperty("java.io.tmpdir")
+val atomKeystoreFile = File(atomKeystoreTempDirectory, "atom-signing-key.jks")
 
 android {
     namespace = "com.mhk2340.agent"
@@ -18,12 +35,26 @@ android {
         ndk {
             abiFilters += setOf("arm64-v8a")
         }
-        versionCode = 1 // PROVISIONAL: placeholder; the roadmap does not define Android release numbering.
-        versionName = "1.0" // PROVISIONAL: placeholder; the roadmap does not define an app version name.
+        // PROVISIONAL - pending GEN-PERF-1
+        versionCode = 2
+        // PROVISIONAL - pending GEN-PERF-1
+        versionName = "1.1"
+    }
+
+    signingConfigs {
+        if (atomSigningConfigured) {
+            create("atomFixed") {
+                storeFile = atomKeystoreFile
+                storePassword = atomKeystorePassword
+                keyAlias = atomKeyAlias
+                keyPassword = atomKeyPassword
+            }
+        }
     }
 
     buildTypes {
         debug {
+            if (atomSigningConfigured) signingConfig = signingConfigs.getByName("atomFixed")
             buildConfigField("boolean", "FAULT_INJECTION_ENABLED", "true")
         }
         release {
@@ -44,6 +75,35 @@ android {
     kotlinOptions {
         // PROVISIONAL: bytecode target selected for Android Gradle Plugin 8.x compatibility.
         jvmTarget = "17"
+    }
+}
+
+if (atomSigningConfigured) {
+    val prepareAtomSigningKeystore = tasks.register("prepareAtomSigningKeystore") {
+        doLast {
+            atomKeystoreFile.delete()
+            atomKeystoreFile.parentFile?.mkdirs()
+            val decodedKeystore = Base64.getDecoder().decode(checkNotNull(atomKeystoreB64))
+            try {
+                atomKeystoreFile.writeBytes(decodedKeystore)
+                atomKeystoreFile.setReadable(false, false)
+                atomKeystoreFile.setWritable(false, false)
+                atomKeystoreFile.setReadable(true, true)
+                atomKeystoreFile.setWritable(true, true)
+            } finally {
+                decodedKeystore.fill(0)
+            }
+        }
+    }
+    val cleanupAtomSigningKeystore = tasks.register("cleanAtomSigningKeystore") {
+        doLast { atomKeystoreFile.delete() }
+    }
+    tasks.matching { it.name == "validateSigningDebug" }.configureEach {
+        dependsOn(prepareAtomSigningKeystore)
+    }
+    tasks.matching { it.name == "packageDebug" }.configureEach {
+        dependsOn(prepareAtomSigningKeystore)
+        finalizedBy(cleanupAtomSigningKeystore)
     }
 }
 

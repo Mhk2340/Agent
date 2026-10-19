@@ -27,7 +27,7 @@ permissions:
 jobs:
   android-cpu-runtime:
     runs-on: ubuntu-latest
-    # PROVISIONAL - pending GEN-PERF-1
+    # // PROVISIONAL - pending GEN-PERF-1
     timeout-minutes: 120
     steps:
       - name: Check out project source
@@ -37,14 +37,14 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          # PROVISIONAL - pending GEN-PERF-1
+          # // PROVISIONAL - pending GEN-PERF-1
           java-version: '17'
           cache: gradle
 
       - name: Install Python for the pinned CMake package
         uses: actions/setup-python@v5
         with:
-          # PROVISIONAL - pending GEN-PERF-1
+          # // PROVISIONAL - pending GEN-PERF-1
           python-version: '3.12'
 
       - name: Install Android SDK command-line tools
@@ -90,8 +90,34 @@ jobs:
       - name: Re-run Android lint
         run: ./gradlew --no-daemon :app:lintDebug
 
-      - name: Package debug APK
-        run: ./gradlew --no-daemon :app:assembleDebug
+      - name: Package debug APK with optional stable signing key
+        shell: bash
+        env:
+          ATOM_KEYSTORE_B64: ${{ secrets.ATOM_KEYSTORE_B64 }}
+          ATOM_KEYSTORE_PASSWORD: ${{ secrets.ATOM_KEYSTORE_PASSWORD }}
+          ATOM_KEY_ALIAS: ${{ secrets.ATOM_KEY_ALIAS }}
+          ATOM_KEY_PASSWORD: ${{ secrets.ATOM_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          key_file="${RUNNER_TEMP}/atom-signing-key.jks"
+          cleanup() { rm -f "$key_file"; }
+          trap cleanup EXIT
+          ./gradlew --no-daemon :app:assembleDebug
+
+      - name: Verify APK signature and print certificate SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apks=(app/build/outputs/apk/debug/*.apk)
+          # // PROVISIONAL - pending GEN-PERF-1
+          if ((${#apks[@]} == 0)); then
+            echo 'No debug APK was packaged.' >&2
+            exit 1
+          fi
+          for apk in "${apks[@]}"; do
+            "$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)" verify --verbose --print-certs "$apk"
+          done
 
       - name: Upload source-built native libraries and APK
         uses: actions/upload-artifact@v4

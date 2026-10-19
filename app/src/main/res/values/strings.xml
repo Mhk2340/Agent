@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Android Agent</string>
+    <string name="app_name">ATOM</string>
     <string name="security_intro">Your private assistant stays locked until you unlock it.</string>
     <string name="runtime_status">Runtime status: %1$s</string>
     <string name="security_title">Security</string>
@@ -9,11 +9,11 @@
     <string name="pin_label">PIN (6–12 digits)</string>
     <string name="pin_confirm_label">Confirm PIN</string>
     <string name="pin_setup_button">Create PIN</string>
-    <string name="pin_entry_title">Unlock Android Agent</string>
+    <string name="pin_entry_title">Unlock ATOM</string>
     <string name="pin_entry_description">Enter your app PIN to continue.</string>
     <string name="pin_unlock_button">Unlock</string>
     <string name="biometric_unlock_button">Use biometrics</string>
-    <string name="biometric_prompt_title">Unlock Android Agent</string>
+    <string name="biometric_prompt_title">Unlock ATOM</string>
     <string name="biometric_prompt_description">Confirm your identity to unlock the app.</string>
     <string name="biometric_negative_button">Use PIN</string>
     <string name="biometric_unavailable">Biometric authentication is unavailable. Use your PIN.</string>
@@ -43,6 +43,19 @@
     <string name="model_import_status_mismatch">The selected file did not match the pinned SHA‑256. No unverified file was installed.</string>
     <string name="model_import_status_failed">Model import failed. No unverified file was installed.</string>
     <string name="model_import_button">Choose model file</string>
+    <string name="local_model_self_test_button">Run local model self-test</string>
+    <string name="local_model_self_test_succeeded">Local model self-test succeeded.</string>
+    <string name="local_model_self_test_failed">Local model self-test failed.</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_load_time">Model load time — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d ms</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_first_token_time">Time to first token — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d ms</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_tokens_per_second">Generated tokens per second — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$.2f</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_token_count">Generated token count — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_peak_memory">Peak process PSS — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d KB</string>
     <string name="model_import_picker_unavailable">A document picker is not available on this device.</string>
     <string name="model_import_auth_required">Unlock the app before importing a model.</string>
     <string name="provider_gemini">Gemini Free provider</string>

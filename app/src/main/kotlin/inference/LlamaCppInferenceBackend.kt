@@ -8,6 +8,7 @@ import kotlinx.serialization.json.Json
 import reasoning.StructuredGrammarConstraint
 import java.io.Closeable
 import java.io.File
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -16,7 +17,21 @@ internal data class NativeGenerationResult(
     val text: String,
     val promptTokens: Int,
     val completionTokens: Int,
-    val finishReason: String
+    val finishReason: String,
+    val firstTokenElapsedNanos: Long,
+    val generationElapsedNanos: Long
+)
+
+internal data class LlamaRuntimeMeasurements(
+    val modelLoadTimeMs: Long,
+    val firstTokenTimeMs: Long,
+    val tokensPerSecond: Double,
+    val tokenCount: Int
+)
+
+internal data class MeasuredLlamaInference(
+    val response: InferenceResponse,
+    val measurements: LlamaRuntimeMeasurements
 )
 
 /** Small test seam around the source-built JNI library. */
@@ -32,6 +47,9 @@ internal interface LlamaNativeBridge {
         grammar: String?
     ): NativeGenerationResult
     fun releaseModel(handle: Long)
+
+    /** Requests llama.cpp's CPU abort callback without waiting for the inference lock. */
+    fun cancelGeneration(handle: Long) = Unit
 }
 
 /** JNI declarations are resolved only when the app actually requests local inference. */
@@ -62,6 +80,11 @@ internal object JniLlamaBridge : LlamaNativeBridge {
         nativeReleaseModel(handle)
     }
 
+    override fun cancelGeneration(handle: Long) {
+        requireLibrary()
+        nativeCancelGeneration(handle)
+    }
+
     private fun requireLibrary() {
         libraryLoadFailure?.let { error ->
             throw IllegalStateException("The CI-built CPU inference library is not packaged", error)
@@ -79,6 +102,7 @@ internal object JniLlamaBridge : LlamaNativeBridge {
         grammar: String?
     ): NativeGenerationResult
     private external fun nativeReleaseModel(handle: Long)
+    private external fun nativeCancelGeneration(handle: Long)
 }
 
 /**
@@ -88,15 +112,20 @@ internal object JniLlamaBridge : LlamaNativeBridge {
 class LlamaCppInferenceBackend internal constructor(
     private val modelAssetStore: ModelAssetStore,
     private val contextTokens: Int,
-    private val bridge: LlamaNativeBridge = JniLlamaBridge
+    private val bridge: LlamaNativeBridge = JniLlamaBridge,
+    private val monotonicNanos: () -> Long = System::nanoTime
 ) : Closeable {
     private val lock = ReentrantLock()
+    private val nativeHandleLock = Any()
     private var loadedModelPath: String? = null
+    @Volatile
     private var nativeHandle: Long = INVALID_NATIVE_HANDLE
 
     private companion object {
         // PROVISIONAL - pending GEN-PERF-1
         const val INVALID_NATIVE_HANDLE = 0L
+        // PROVISIONAL - pending GEN-PERF-1
+        const val NANOSECONDS_PER_SECOND = 1_000_000_000.0
     }
 
     init {
@@ -104,7 +133,16 @@ class LlamaCppInferenceBackend internal constructor(
         require(contextTokens > 0) { "The configured context window must be positive" }
     }
 
-    fun generate(request: InferenceRequest): Result<InferenceResponse> {
+    fun generate(request: InferenceRequest): Result<InferenceResponse> =
+        generateMeasured(request).map { it.response }
+
+    internal fun generateMeasured(
+        request: InferenceRequest,
+        isStillAllowed: () -> Boolean = { true }
+    ): Result<MeasuredLlamaInference> {
+        if (!isStillAllowedSafely(isStillAllowed)) {
+            return failure(InferenceError.Unavailable("Local self-test was stopped"))
+        }
         if (request.onToken != null || request.streamState == contracts.StreamState.STREAMING) {
             return failure(InferenceError.Unavailable("Incremental streaming is not supported by this CPU backend"))
         }
@@ -128,10 +166,14 @@ class LlamaCppInferenceBackend internal constructor(
             ?: return failure(InferenceError.Unavailable("Import the SHA-256-verified Qwen3 model before local inference"))
 
         return try {
+            var modelLoadNanos = 0L
             val nativeResult = lock.withLock {
-                val handle = ensureLoaded(modelFile)
+                if (!isStillAllowedSafely(isStillAllowed)) throw LocalSelfTestStoppedException()
+                val loaded = ensureLoaded(modelFile)
+                modelLoadNanos = loaded.loadDurationNanos
+                if (!isStillAllowedSafely(isStillAllowed)) throw LocalSelfTestStoppedException()
                 bridge.generate(
-                    handle = handle,
+                    handle = loaded.handle,
                     context = request.context,
                     prompt = request.prompt,
                     maxTokens = request.params.max_tokens,
@@ -140,49 +182,96 @@ class LlamaCppInferenceBackend internal constructor(
                     grammar = grammar
                 )
             }
+            if (!isStillAllowedSafely(isStillAllowed)) {
+                return failure(InferenceError.Unavailable("Local self-test was stopped"))
+            }
+            if (nativeResult.firstTokenElapsedNanos < 0L ||
+                nativeResult.generationElapsedNanos < nativeResult.firstTokenElapsedNanos
+            ) {
+                return failure(InferenceError.Unavailable("Native timing data was unavailable"))
+            }
+            val decodeNanos = nativeResult.generationElapsedNanos - nativeResult.firstTokenElapsedNanos
+            val tokenRate = if (nativeResult.completionTokens > 0 && decodeNanos > 0L) {
+                nativeResult.completionTokens.toDouble() * NANOSECONDS_PER_SECOND / decodeNanos.toDouble()
+            } else {
+                0.0
+            }
             Result.success(
-                InferenceResponse(
-                    text = nativeResult.text,
-                    usage = TokenUsage(
-                        prompt_tokens = nativeResult.promptTokens,
-                        completion_tokens = nativeResult.completionTokens
+                MeasuredLlamaInference(
+                    response = InferenceResponse(
+                        text = nativeResult.text,
+                        usage = TokenUsage(
+                            prompt_tokens = nativeResult.promptTokens,
+                            completion_tokens = nativeResult.completionTokens
+                        ),
+                        finish_reason = nativeResult.finishReason
                     ),
-                    finish_reason = nativeResult.finishReason
+                    measurements = LlamaRuntimeMeasurements(
+                        modelLoadTimeMs = TimeUnit.NANOSECONDS.toMillis(modelLoadNanos.coerceAtLeast(0L)),
+                        firstTokenTimeMs = TimeUnit.NANOSECONDS.toMillis(nativeResult.firstTokenElapsedNanos),
+                        tokensPerSecond = tokenRate,
+                        tokenCount = nativeResult.completionTokens
+                    )
                 )
             )
-        } catch (error: OutOfMemoryError) {
+        } catch (_: OutOfMemoryError) {
             failure(InferenceError.ResourceExhausted("The CPU model or context could not be allocated"))
-        } catch (error: LinkageError) {
+        } catch (_: LinkageError) {
             failure(InferenceError.Unavailable("The source-built CPU inference library could not be loaded"))
-        } catch (error: Exception) {
-            failure(InferenceError.Unavailable(error.message ?: "Native CPU inference failed"))
+        } catch (_: Exception) {
+            failure(InferenceError.Unavailable("Native CPU inference failed"))
+        }
+    }
+
+    /** Can be called without waiting for the generation lock; the CPU context checks this at decode boundaries. */
+    fun requestAbortGeneration() {
+        synchronized(nativeHandleLock) {
+            val handle = nativeHandle
+            if (handle != INVALID_NATIVE_HANDLE) runCatching { bridge.cancelGeneration(handle) }
         }
     }
 
     override fun close() {
         lock.withLock {
-            if (nativeHandle != INVALID_NATIVE_HANDLE) {
-                runCatching { bridge.releaseModel(nativeHandle) }
-                nativeHandle = INVALID_NATIVE_HANDLE
-                loadedModelPath = null
+            synchronized(nativeHandleLock) {
+                if (nativeHandle != INVALID_NATIVE_HANDLE) {
+                    runCatching { bridge.releaseModel(nativeHandle) }
+                    nativeHandle = INVALID_NATIVE_HANDLE
+                    loadedModelPath = null
+                }
             }
         }
     }
 
-    private fun ensureLoaded(modelFile: File): Long {
+    private data class LoadedModel(val handle: Long, val loadDurationNanos: Long)
+
+    private fun ensureLoaded(modelFile: File): LoadedModel {
         val path = modelFile.absolutePath
         if (loadedModelPath != null && loadedModelPath != path) {
-            if (nativeHandle != INVALID_NATIVE_HANDLE) bridge.releaseModel(nativeHandle)
-            nativeHandle = INVALID_NATIVE_HANDLE
-            loadedModelPath = null
+            synchronized(nativeHandleLock) {
+                if (nativeHandle != INVALID_NATIVE_HANDLE) runCatching { bridge.releaseModel(nativeHandle) }
+                nativeHandle = INVALID_NATIVE_HANDLE
+                loadedModelPath = null
+            }
         }
         if (nativeHandle == INVALID_NATIVE_HANDLE) {
-            nativeHandle = bridge.loadModel(path, contextTokens)
-            check(nativeHandle != INVALID_NATIVE_HANDLE) { "llama.cpp returned an invalid model handle" }
-            loadedModelPath = path
+            val start = monotonicNanos()
+            val loadedHandle = bridge.loadModel(path, contextTokens)
+            val loadDuration = (monotonicNanos() - start).coerceAtLeast(0L)
+            check(loadedHandle != INVALID_NATIVE_HANDLE) { "llama.cpp returned an invalid model handle" }
+            synchronized(nativeHandleLock) {
+                nativeHandle = loadedHandle
+                loadedModelPath = path
+            }
+            return LoadedModel(loadedHandle, loadDuration)
         }
-        return nativeHandle
+        return LoadedModel(nativeHandle, 0L)
     }
+
+    private fun isStillAllowedSafely(check: () -> Boolean): Boolean =
+        runCatching(check).getOrDefault(false)
+
+    private class LocalSelfTestStoppedException : IllegalStateException("Local self-test was stopped")
 
     private fun grammarFor(outputSchema: String?): String? {
         if (outputSchema == null) return null
@@ -191,6 +280,6 @@ class LlamaCppInferenceBackend internal constructor(
         return if (requested == expected) StructuredGrammarConstraint.gbnfGrammarDefinition else null
     }
 
-    private fun failure(error: InferenceError): Result<InferenceResponse> =
+    private fun <T> failure(error: InferenceError): Result<T> =
         Result.failure(AgentModelException(error))
 }

@@ -138,6 +138,27 @@
         android:layout_marginTop="4dp"
         android:text="@string/model_import_button" />
 
+    <Button
+        android:id="@+id/settings_local_model_self_test_button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:enabled="false"
+        android:text="@string/local_model_self_test_button" />
+
+    <TextView
+        android:id="@+id/local_model_self_test_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="@color/agent_text"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/local_model_self_test_metrics"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="@color/agent_secondary_text"
+        android:visibility="gone" />
+
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

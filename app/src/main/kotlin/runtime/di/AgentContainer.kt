@@ -20,6 +20,9 @@ import inference.InferenceDelegateExecutor
 import inference.InferenceDelegateOutput
 import inference.LlamaCppInferenceBackend
 import inference.LocalInferenceEngine
+import inference.LocalModelSelfTestCancellation
+import inference.LocalModelSelfTestSession
+import inference.LlamaRuntimeMeasurements
 import inference.ModelAssetStore
 import inference.PanicResetBenchmarkWorkCanceller
 import inference.ProductionDeviceBenchmarkMeasurement
@@ -68,6 +71,7 @@ import security.SecurityEpochStore
 import security.SecurityRecoveryAuditSink
 import security.SecurityUiActions
 import security.KeystoreSecretManager
+import java.util.concurrent.atomic.AtomicReference
 import safety.AccessMethod
 import safety.SafetyGuard
 import safety.ToolRegistryRow
@@ -183,6 +187,37 @@ class AgentContainer(
             supportsSeed = false,
             supportsCancellation = false
         )
+    }
+
+    /** Creates a disposable, diagnostics-free backend while preserving the normal InferenceEngine route. */
+    internal fun createLocalModelSelfTestSession(
+        cancellation: LocalModelSelfTestCancellation
+    ): LocalModelSelfTestSession {
+        val measurements = AtomicReference<LlamaRuntimeMeasurements?>(null)
+        val backend = LlamaCppInferenceBackend(
+            localModelAssetStore,
+            localInferenceBudgetPolicy.maxContextTokens
+        )
+        val engine = LocalInferenceEngine(
+            budgetPolicy = localInferenceBudgetPolicy,
+            delegateBackendExecutor = InferenceDelegateExecutor { delegate, request ->
+                if (delegate != HardwareDelegate.CPU) {
+                    Result.failure(IllegalStateException("The local self-test is CPU-only"))
+                } else {
+                    backend.generateMeasured(request) { !cancellation.isCancelled() }.map { generated ->
+                        measurements.set(generated.measurements)
+                        InferenceDelegateOutput(generated.response)
+                    }
+                }
+            },
+            modeDelegateOverride = { HardwareDelegate.CPU },
+            supportsStreaming = false,
+            supportsSeed = false,
+            supportsCancellation = false
+        )
+        val session = LocalModelSelfTestSession(engine, backend, measurements)
+        cancellation.attachAbortHandler(session::requestAbort)
+        return session
     }
 
     private var appLockStateStoreOverrideForTest: AppLockStateStore? = null

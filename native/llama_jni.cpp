@@ -2,6 +2,8 @@
 
 #include "llama.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -20,6 +22,7 @@ struct NativeSession {
     llama_context * context = nullptr;
     // PROVISIONAL - pending GEN-PERF-1
     uint32_t contextTokens = 0;
+    std::atomic<bool> abortRequested{false};
     std::mutex mutex;
 
     ~NativeSession() {
@@ -40,6 +43,11 @@ constexpr int32_t kLlamaDecodeSuccess = 0;
 constexpr int32_t kLlamaDecodeNoKvSlot = 1;
 // PROVISIONAL - pending GEN-PERF-1
 constexpr jlong kInvalidNativeHandle = 0;
+
+bool shouldAbortDecode(void * data) {
+    const auto * session = static_cast<const NativeSession *>(data);
+    return session == nullptr || session->abortRequested.load(std::memory_order_relaxed);
+}
 
 void checkDecodeStatus(int32_t status) {
     if (status == kLlamaDecodeSuccess) {
@@ -308,7 +316,9 @@ jobject makeGenerationResult(
     const std::string & text,
     jint promptTokens,
     jint completionTokens,
-    const std::string & finishReason
+    const std::string & finishReason,
+    jlong firstTokenElapsedNanos,
+    jlong generationElapsedNanos
 ) {
     jclass resultClass = env->FindClass("inference/NativeGenerationResult");
     if (resultClass == nullptr) {
@@ -317,7 +327,7 @@ jobject makeGenerationResult(
     const jmethodID constructor = env->GetMethodID(
         resultClass,
         "<init>",
-        "(Ljava/lang/String;IILjava/lang/String;)V"
+        "(Ljava/lang/String;IILjava/lang/String;JJ)V"
     );
     if (constructor == nullptr) {
         env->DeleteLocalRef(resultClass);
@@ -333,7 +343,16 @@ jobject makeGenerationResult(
         return nullptr;
     }
 
-    jobject result = env->NewObject(resultClass, constructor, javaText, promptTokens, completionTokens, javaFinishReason);
+    jobject result = env->NewObject(
+        resultClass,
+        constructor,
+        javaText,
+        promptTokens,
+        completionTokens,
+        javaFinishReason,
+        firstTokenElapsedNanos,
+        generationElapsedNanos
+    );
     env->DeleteLocalRef(javaText);
     env->DeleteLocalRef(javaFinishReason);
     env->DeleteLocalRef(resultClass);
@@ -365,6 +384,8 @@ Java_inference_JniLlamaBridge_nativeLoadModel(JNIEnv * env, jobject, jstring mod
         llama_context_params contextParams = llama_context_default_params();
         contextParams.n_ctx = static_cast<uint32_t>(contextTokens);
         contextParams.n_batch = static_cast<uint32_t>(contextTokens);
+        contextParams.abort_callback = shouldAbortDecode;
+        contextParams.abort_callback_data = session.get();
         contextParams.offload_kqv = false;
         contextParams.op_offload = false;
         session->context = llama_init_from_model(session->model, contextParams);
@@ -414,6 +435,7 @@ Java_inference_JniLlamaBridge_nativeGenerate(
         }
 
         std::lock_guard<std::mutex> guard(session->mutex);
+        const auto generationStarted = std::chrono::steady_clock::now();
         const std::string formattedPrompt = formatPrompt(session->model, context, prompt);
         const llama_vocab * vocab = llama_model_get_vocab(session->model);
         std::vector<llama_token> promptTokens = tokenizePrompt(vocab, formattedPrompt);
@@ -478,11 +500,19 @@ Java_inference_JniLlamaBridge_nativeGenerate(
         constexpr int32_t kLastLogitsIndex = -1;
         std::vector<llama_token> outputTokens;
         std::string finishReason = "max_tokens";
+        jlong firstTokenElapsedNanos{};
+        bool firstTokenRecorded = false;
         for (jint produced = 0; produced < maxTokens; ++produced) {
             const llama_token token = llama_sampler_sample(sampler.get(), session->context, kLastLogitsIndex);
             if (llama_vocab_is_eog(vocab, token)) {
                 finishReason = "stop";
                 break;
+            }
+            if (!firstTokenRecorded) {
+                firstTokenElapsedNanos = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - generationStarted
+                ).count();
+                firstTokenRecorded = true;
             }
             outputTokens.push_back(token);
             const llama_batch nextBatch = llama_batch_get_one(&outputTokens.back(), kSingleTokenBatchSize);
@@ -490,6 +520,9 @@ Java_inference_JniLlamaBridge_nativeGenerate(
         }
 
         const std::string outputText = detokenize(vocab, outputTokens);
+        const jlong generationElapsedNanos = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - generationStarted
+        ).count();
         if (promptTokens.size() > static_cast<size_t>(std::numeric_limits<jint>::max()) ||
             outputTokens.size() > static_cast<size_t>(std::numeric_limits<jint>::max())) {
             throw std::runtime_error("Token usage count exceeds the Kotlin contract range");
@@ -499,7 +532,9 @@ Java_inference_JniLlamaBridge_nativeGenerate(
             outputText,
             static_cast<jint>(promptTokens.size()),
             static_cast<jint>(outputTokens.size()),
-            finishReason
+            finishReason,
+            firstTokenElapsedNanos,
+            generationElapsedNanos
         );
     } catch (const std::bad_alloc &) {
         throwJava(env, "java/lang/OutOfMemoryError", "The CPU inference context could not process this request");
@@ -529,5 +564,14 @@ Java_inference_JniLlamaBridge_nativeReleaseModel(JNIEnv * env, jobject, jlong ha
         }
     }
     delete session;
+    (void) env;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_inference_JniLlamaBridge_nativeCancelGeneration(JNIEnv * env, jobject, jlong handle) {
+    NativeSession * session = sessionFromHandle(handle);
+    if (session != nullptr) {
+        session->abortRequested.store(true, std::memory_order_relaxed);
+    }
     (void) env;
 }

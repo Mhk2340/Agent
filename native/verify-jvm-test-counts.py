@@ -4,11 +4,11 @@
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
-# PROVISIONAL - pending GEN-PERF-1
+# // PROVISIONAL - pending GEN-PERF-1
 ZERO = 0
-# PROVISIONAL - pending GEN-PERF-1
-APP_TEST_MINIMUM = 148
-# PROVISIONAL - pending GEN-PERF-1
+# // PROVISIONAL - pending GEN-PERF-1
+APP_TEST_MINIMUM = 156
+# // PROVISIONAL - pending GEN-PERF-1
 SAFETY_TEST_EXPECTED = 17
 
 

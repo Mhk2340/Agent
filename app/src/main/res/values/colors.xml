@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <color name="ic_launcher_background">#000000</color>
     <color name="agent_background">#F3F6FA</color>
     <color name="agent_surface">#FFFFFF</color>
     <color name="agent_accent">#1565C0</color>

@@ -5,6 +5,8 @@ import android.content.Intent
 import android.hardware.biometrics.BiometricPrompt
 import android.os.Bundle
 import android.os.CancellationSignal
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.view.WindowManager
 import android.widget.EditText
@@ -13,6 +15,10 @@ import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import inference.AndroidProcessPssProbe
+import inference.LocalModelSelfTestCancellation
+import inference.LocalModelSelfTestOutcome
+import inference.LocalModelSelfTestRunner
 import inference.ModelAssetStore
 import runtime.RuntimeStateManager
 import security.AppLockStatus
@@ -33,14 +39,25 @@ class MainActivity : Activity() {
     private lateinit var screenContainer: FrameLayout
     private lateinit var securityWorker: ExecutorService
     private lateinit var modelImportWorker: ExecutorService
+    private lateinit var localModelSelfTestWorker: ExecutorService
     private val actionInFlight = AtomicBoolean(false)
     private val modelImportInFlight = AtomicBoolean(false)
+    private val localModelSelfTestInFlight = AtomicBoolean(false)
+    private val localModelSelfTestHandler = Handler(Looper.getMainLooper())
+    private var activeLocalModelSelfTestCancellation: LocalModelSelfTestCancellation? = null
+    private var localModelSelfTestDisplayResult: LocalModelSelfTestOutcome? = null
+    private var localModelSelfTestTimeoutRunnable: Runnable? = null
+    private var localModelSelfTestEligibilityRunnable: Runnable? = null
     private var modelImportStatusOverride: Int? = null
     private var lastRenderedState: SecurityUiState? = null
 
     private companion object {
         // PROVISIONAL - pending GEN-PERF-1
         const val MODEL_IMPORT_REQUEST_CODE = 0x4d49
+        // PROVISIONAL - pending GEN-PERF-1
+        const val LOCAL_MODEL_SELF_TEST_TIMEOUT_MS = 300_000L
+        // PROVISIONAL - pending GEN-PERF-1
+        const val LOCAL_MODEL_SELF_TEST_ELIGIBILITY_POLL_MS = 250L
     }
 
     private val timeoutOptionsMs = longArrayOf(
@@ -73,6 +90,9 @@ class MainActivity : Activity() {
         modelImportWorker = Executors.newSingleThreadExecutor { task ->
             Thread(task, "model-import-worker").apply { isDaemon = true }
         }
+        localModelSelfTestWorker = Executors.newSingleThreadExecutor { task ->
+            Thread(task, "local-model-self-test-worker").apply { isDaemon = true }
+        }
         dispatch { it.state() }
     }
 
@@ -84,14 +104,18 @@ class MainActivity : Activity() {
     }
 
     override fun onStop() {
+        cancelLocalModelSelfTest()
         clearSensitiveInputs()
         super.onStop()
     }
 
     override fun onDestroy() {
+        cancelLocalModelSelfTest()
+        removeLocalModelSelfTestWatchdogs()
         clearSensitiveInputs()
         if (::securityWorker.isInitialized) securityWorker.shutdown()
         if (::modelImportWorker.isInitialized) modelImportWorker.shutdownNow()
+        if (::localModelSelfTestWorker.isInitialized) localModelSelfTestWorker.shutdownNow()
         super.onDestroy()
     }
 
@@ -140,6 +164,9 @@ class MainActivity : Activity() {
     }
 
     private fun render(state: SecurityUiState) {
+        if (state !is SecurityUiState.Settings && localModelSelfTestInFlight.get()) {
+            cancelLocalModelSelfTest()
+        }
         lastRenderedState = state
         val screen = when (state) {
             is SecurityUiState.PinSetup -> inflateScreen(R.layout.screen_pin_setup)
@@ -243,9 +270,15 @@ class MainActivity : Activity() {
         }
         screen.findViewById<TextView>(R.id.model_import_status).setText(modelStatus)
         screen.findViewById<View>(R.id.settings_model_import_button).apply {
-            isEnabled = !modelImportInFlight.get()
+            isEnabled = !modelImportInFlight.get() && !localModelSelfTestInFlight.get()
             setOnClickListener { openModelDocumentPicker() }
         }
+        screen.findViewById<View>(R.id.settings_local_model_self_test_button).apply {
+            isEnabled = isLocalModelSelfTestEligible(container) && !localModelSelfTestInFlight.get() &&
+                !modelImportInFlight.get()
+            setOnClickListener { startLocalModelSelfTest() }
+        }
+        renderLocalModelSelfTestResult(screen)
 
         val geminiSaved = security.ProviderCredentialCatalog.GEMINI_FREE in state.configuredProviderIds
         val groqSaved = security.ProviderCredentialCatalog.GROQ_FREE in state.configuredProviderIds
@@ -290,20 +323,25 @@ class MainActivity : Activity() {
             dispatch { it.setBiometricEnabled(enabled) }
         }
         screen.findViewById<View>(R.id.settings_panic_reset_button).setOnClickListener {
+            cancelLocalModelSelfTest()
             dispatch { it.openPanicReset() }
         }
         screen.findViewById<View>(R.id.settings_recovery_button).setOnClickListener {
+            cancelLocalModelSelfTest()
             dispatch { it.openRecovery() }
         }
         screen.findViewById<View>(R.id.settings_back_button).setOnClickListener {
+            cancelLocalModelSelfTest()
             dispatch { it.goHome() }
         }
         screen.findViewById<View>(R.id.settings_lock_button).setOnClickListener {
+            cancelLocalModelSelfTest()
             dispatch { it.lockNow() }
         }
     }
 
     private fun openModelDocumentPicker() {
+        if (localModelSelfTestInFlight.get()) return
         val container = (application as AgentApplication).agentContainer
         if (!container.appLockManager.isAppUnlocked()) {
             modelImportStatusOverride = R.string.model_import_auth_required
@@ -381,7 +419,148 @@ class MainActivity : Activity() {
         if (!::screenContainer.isInitialized) return
         screenContainer.findViewById<TextView>(R.id.model_import_status)?.setText(resourceId)
         screenContainer.findViewById<View>(R.id.settings_model_import_button)?.isEnabled =
-            !modelImportInFlight.get()
+            !modelImportInFlight.get() && !localModelSelfTestInFlight.get()
+        updateLocalModelSelfTestButton()
+    }
+
+    private fun startLocalModelSelfTest() {
+        val container = (application as AgentApplication).agentContainer
+        if (!isLocalModelSelfTestEligible(container) ||
+            !localModelSelfTestInFlight.compareAndSet(false, true)
+        ) return
+
+        val cancellation = LocalModelSelfTestCancellation()
+        activeLocalModelSelfTestCancellation = cancellation
+        localModelSelfTestDisplayResult = null
+        renderLocalModelSelfTestResult(screenContainer)
+        screenContainer.findViewById<View>(R.id.settings_model_import_button)?.isEnabled = false
+        updateLocalModelSelfTestButton()
+
+        val timeout = Runnable {
+            if (activeLocalModelSelfTestCancellation === cancellation) {
+                cancellation.cancel()
+                removeLocalModelSelfTestWatchdogs()
+                localModelSelfTestDisplayResult = LocalModelSelfTestOutcome.Failure
+                if (lastRenderedState is SecurityUiState.Settings && !isFinishing && !isDestroyed) {
+                    renderLocalModelSelfTestResult(screenContainer)
+                    updateLocalModelSelfTestButton()
+                }
+            }
+        }
+        localModelSelfTestTimeoutRunnable = timeout
+        localModelSelfTestHandler.postDelayed(timeout, LOCAL_MODEL_SELF_TEST_TIMEOUT_MS)
+
+        val eligibilityWatcher = object : Runnable {
+            override fun run() {
+                if (activeLocalModelSelfTestCancellation !== cancellation || cancellation.isCancelled()) return
+                if (!isLocalModelSelfTestEligible(container)) {
+                    cancelLocalModelSelfTest()
+                    return
+                }
+                localModelSelfTestHandler.postDelayed(this, LOCAL_MODEL_SELF_TEST_ELIGIBILITY_POLL_MS)
+            }
+        }
+        localModelSelfTestEligibilityRunnable = eligibilityWatcher
+        localModelSelfTestHandler.postDelayed(eligibilityWatcher, LOCAL_MODEL_SELF_TEST_ELIGIBILITY_POLL_MS)
+
+        try {
+            localModelSelfTestWorker.execute {
+                val outcome = LocalModelSelfTestRunner(
+                    sessionFactory = container::createLocalModelSelfTestSession,
+                    pssProbe = AndroidProcessPssProbe,
+                    isEligible = { isLocalModelSelfTestEligible(container) }
+                ).run(cancellation)
+                runOnUiThread { completeLocalModelSelfTest(container, cancellation, outcome) }
+            }
+        } catch (_: RejectedExecutionException) {
+            cancellation.cancel()
+            completeLocalModelSelfTest(container, cancellation, LocalModelSelfTestOutcome.Failure)
+        }
+    }
+
+    private fun completeLocalModelSelfTest(
+        container: runtime.di.AgentContainer,
+        cancellation: LocalModelSelfTestCancellation,
+        outcome: LocalModelSelfTestOutcome
+    ) {
+        if (activeLocalModelSelfTestCancellation !== cancellation) return
+        removeLocalModelSelfTestWatchdogs()
+        activeLocalModelSelfTestCancellation = null
+        localModelSelfTestInFlight.set(false)
+        localModelSelfTestDisplayResult = if (
+            cancellation.isCancelled() || !isLocalModelSelfTestEligible(container)
+        ) LocalModelSelfTestOutcome.Failure else outcome
+        if (lastRenderedState is SecurityUiState.Settings && !isFinishing && !isDestroyed) {
+            renderLocalModelSelfTestResult(screenContainer)
+            updateLocalModelSelfTestButton()
+            screenContainer.findViewById<View>(R.id.settings_model_import_button)?.isEnabled =
+                !modelImportInFlight.get()
+        }
+    }
+
+    private fun cancelLocalModelSelfTest() {
+        val cancellation = activeLocalModelSelfTestCancellation ?: return
+        cancellation.cancel()
+        removeLocalModelSelfTestWatchdogs()
+        localModelSelfTestDisplayResult = LocalModelSelfTestOutcome.Failure
+        if (lastRenderedState is SecurityUiState.Settings && ::screenContainer.isInitialized &&
+            !isFinishing && !isDestroyed
+        ) {
+            renderLocalModelSelfTestResult(screenContainer)
+            updateLocalModelSelfTestButton()
+        }
+    }
+
+    private fun removeLocalModelSelfTestWatchdogs() {
+        localModelSelfTestTimeoutRunnable?.let(localModelSelfTestHandler::removeCallbacks)
+        localModelSelfTestEligibilityRunnable?.let(localModelSelfTestHandler::removeCallbacks)
+        localModelSelfTestTimeoutRunnable = null
+        localModelSelfTestEligibilityRunnable = null
+    }
+
+    private fun isLocalModelSelfTestEligible(container: runtime.di.AgentContainer): Boolean = runCatching {
+        container.appLockManager.isAppUnlocked() &&
+            container.lockdownCondition() == LockdownCondition.NONE &&
+            container.localModelAssetStore.isInstalled()
+    }.getOrDefault(false)
+
+    private fun updateLocalModelSelfTestButton() {
+        if (!::screenContainer.isInitialized) return
+        val container = (application as AgentApplication).agentContainer
+        screenContainer.findViewById<View>(R.id.settings_local_model_self_test_button)?.isEnabled =
+            isLocalModelSelfTestEligible(container) && !localModelSelfTestInFlight.get() &&
+                !modelImportInFlight.get()
+    }
+
+    private fun renderLocalModelSelfTestResult(screen: View) {
+        val status = screen.findViewById<TextView>(R.id.local_model_self_test_status)
+        val metricsView = screen.findViewById<TextView>(R.id.local_model_self_test_metrics)
+        when (val result = localModelSelfTestDisplayResult) {
+            null -> {
+                status.visibility = View.GONE
+                metricsView.visibility = View.GONE
+                metricsView.text = ""
+            }
+            LocalModelSelfTestOutcome.Failure -> {
+                status.setText(R.string.local_model_self_test_failed)
+                status.visibility = View.VISIBLE
+                metricsView.visibility = View.GONE
+                metricsView.text = ""
+            }
+            is LocalModelSelfTestOutcome.Success -> {
+                val metrics = result.metrics
+                status.setText(R.string.local_model_self_test_succeeded)
+                status.visibility = View.VISIBLE
+                metricsView.text = listOf(
+                    getString(R.string.local_model_self_test_load_time, metrics.modelLoadTimeMs),
+                    getString(R.string.local_model_self_test_first_token_time, metrics.firstTokenTimeMs),
+                    getString(R.string.local_model_self_test_tokens_per_second, metrics.tokensPerSecond),
+                    getString(R.string.local_model_self_test_token_count, metrics.tokenCount),
+                    getString(R.string.local_model_self_test_peak_memory, metrics.peakPssKilobytes)
+                ).joinToString("\n")
+                metricsView.visibility = View.VISIBLE
+            }
+        }
     }
 
     private fun attachCredentialSave(screen: View, inputId: Int, buttonId: Int, providerName: String) {
