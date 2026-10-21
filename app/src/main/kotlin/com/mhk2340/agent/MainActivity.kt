@@ -8,6 +8,7 @@ import android.os.CancellationSignal
 import android.os.Handler
 import android.os.Looper
 import android.view.View
+import android.view.Window
 import android.view.WindowManager
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -33,7 +34,14 @@ import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Native View/XML security entry point. Sensitive screens are protected from screenshots/recents. */
+/** Applies screenshot protection only to non-debug builds. */
+internal fun applySecureWindowFlag(window: Window, isDebugBuild: Boolean = BuildConfig.DEBUG) {
+    if (!isDebugBuild) {
+        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+    }
+}
+
+/** Native View/XML security entry point. Release screens are protected from screenshots/recents. */
 class MainActivity : Activity() {
     private lateinit var viewModel: SecurityViewModel
     private lateinit var screenContainer: FrameLayout
@@ -73,7 +81,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        applySecureWindowFlag(window)
         setContentView(R.layout.activity_main)
 
         val app = application as AgentApplication
