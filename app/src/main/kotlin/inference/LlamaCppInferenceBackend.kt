@@ -36,7 +36,8 @@ internal data class MeasuredLlamaInference(
 
 /** Small test seam around the source-built JNI library. */
 internal interface LlamaNativeBridge {
-    fun loadModel(modelPath: String, contextTokens: Int): Long
+    fun loadModel(modelPath: String, contextTokens: Int, nThreads: Int, nThreadsBatch: Int): Long
+    fun systemInfo(): String
     fun generate(
         handle: Long,
         context: String,
@@ -54,12 +55,25 @@ internal interface LlamaNativeBridge {
 
 /** JNI declarations are resolved only when the app actually requests local inference. */
 internal object JniLlamaBridge : LlamaNativeBridge {
-    private val libraryLoadFailure: Throwable? =
-        runCatching { System.loadLibrary("agent_llama") }.exceptionOrNull()
+    private val libraryLoadFailure: Throwable? = runCatching {
+        loadNativeLibraryAfterArmDotprodCheck {
+            System.loadLibrary("agent_llama")
+        }
+    }.exceptionOrNull()
 
-    override fun loadModel(modelPath: String, contextTokens: Int): Long {
+    override fun loadModel(
+        modelPath: String,
+        contextTokens: Int,
+        nThreads: Int,
+        nThreadsBatch: Int
+    ): Long {
         requireLibrary()
-        return nativeLoadModel(modelPath, contextTokens)
+        return nativeLoadModel(modelPath, contextTokens, nThreads, nThreadsBatch)
+    }
+
+    override fun systemInfo(): String {
+        requireLibrary()
+        return nativeSystemInfo()
     }
 
     override fun generate(
@@ -87,11 +101,17 @@ internal object JniLlamaBridge : LlamaNativeBridge {
 
     private fun requireLibrary() {
         libraryLoadFailure?.let { error ->
-            throw IllegalStateException("The CI-built CPU inference library is not packaged", error)
+            throw IllegalStateException("The local CPU runtime is unavailable", error)
         }
     }
 
-    private external fun nativeLoadModel(modelPath: String, contextTokens: Int): Long
+    private external fun nativeLoadModel(
+        modelPath: String,
+        contextTokens: Int,
+        nThreads: Int,
+        nThreadsBatch: Int
+    ): Long
+    private external fun nativeSystemInfo(): String
     private external fun nativeGenerate(
         handle: Long,
         context: String,
@@ -113,7 +133,9 @@ class LlamaCppInferenceBackend internal constructor(
     private val modelAssetStore: ModelAssetStore,
     private val contextTokens: Int,
     private val bridge: LlamaNativeBridge = JniLlamaBridge,
-    private val monotonicNanos: () -> Long = System::nanoTime
+    private val monotonicNanos: () -> Long = System::nanoTime,
+    private val nThreads: Int = Runtime.getRuntime().availableProcessors(),
+    private val nThreadsBatch: Int = nThreads
 ) : Closeable {
     private val lock = ReentrantLock()
     private val nativeHandleLock = Any()
@@ -131,6 +153,10 @@ class LlamaCppInferenceBackend internal constructor(
     init {
         // PROVISIONAL - pending GEN-PERF-1
         require(contextTokens > 0) { "The configured context window must be positive" }
+        // PROVISIONAL - pending GEN-PERF-1
+        require(nThreads > 0) { "The configured inference thread count must be positive" }
+        // PROVISIONAL - pending GEN-PERF-1
+        require(nThreadsBatch > 0) { "The configured batch thread count must be positive" }
     }
 
     fun generate(request: InferenceRequest): Result<InferenceResponse> =
@@ -223,6 +249,8 @@ class LlamaCppInferenceBackend internal constructor(
         }
     }
 
+    internal fun systemInfo(): String = bridge.systemInfo()
+
     /** Can be called without waiting for the generation lock; the CPU context checks this at decode boundaries. */
     fun requestAbortGeneration() {
         synchronized(nativeHandleLock) {
@@ -256,7 +284,7 @@ class LlamaCppInferenceBackend internal constructor(
         }
         if (nativeHandle == INVALID_NATIVE_HANDLE) {
             val start = monotonicNanos()
-            val loadedHandle = bridge.loadModel(path, contextTokens)
+            val loadedHandle = bridge.loadModel(path, contextTokens, nThreads, nThreadsBatch)
             val loadDuration = (monotonicNanos() - start).coerceAtLeast(0L)
             check(loadedHandle != INVALID_NATIVE_HANDLE) { "llama.cpp returned an invalid model handle" }
             synchronized(nativeHandleLock) {

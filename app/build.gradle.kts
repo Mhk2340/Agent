@@ -36,9 +36,9 @@ android {
             abiFilters += setOf("arm64-v8a")
         }
         // PROVISIONAL - pending GEN-PERF-1
-        versionCode = 3
+        versionCode = 4
         // PROVISIONAL - pending GEN-PERF-1
-        versionName = "1.2"
+        versionName = "1.3"
     }
 
     signingConfigs {

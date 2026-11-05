@@ -47,15 +47,14 @@
     <string name="local_model_self_test_succeeded">خودآزمایی مدل محلی موفق بود.</string>
     <string name="local_model_self_test_failed">خودآزمایی مدل محلی ناموفق بود.</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_load_time">زمان بارگذاری مدل — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d ms</string>
+    <string name="local_model_self_test_n_threads">n_threads — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_prompt_tokens">تعداد توکن‌های prompt قالب‌بندی‌شده — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
     <string name="local_model_self_test_first_token_time">زمان تا نخستین توکن — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d ms</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_tokens_per_second">توکن بر ثانیه — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$.2f</string>
-    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_token_count">تعداد توکن تولیدشده — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d</string>
-    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_peak_memory">اوج PSS فرایند — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d KB</string>
+    <string name="local_model_self_test_tokens_per_second">توکن تولیدشده در ثانیه — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$.2f</string>
+    <string name="local_model_self_test_system_info">system_info کتابخانه: %1$s</string>
     <string name="model_import_picker_unavailable">انتخاب‌گر سند در این دستگاه در دسترس نیست.</string>
     <string name="model_import_auth_required">پیش از واردکردن مدل، قفل برنامه را باز کنید.</string>
     <string name="provider_gemini">ارائه‌دهندهٔ Gemini Free</string>

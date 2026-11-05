@@ -2,6 +2,7 @@
 
 #include "llama.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -22,6 +23,8 @@ struct NativeSession {
     llama_context * context = nullptr;
     // PROVISIONAL - pending GEN-PERF-1
     uint32_t contextTokens = 0;
+    // PROVISIONAL - pending GEN-PERF-1
+    uint32_t batchTokens = 0;
     std::atomic<bool> abortRequested{false};
     std::mutex mutex;
 
@@ -43,6 +46,8 @@ constexpr int32_t kLlamaDecodeSuccess = 0;
 constexpr int32_t kLlamaDecodeNoKvSlot = 1;
 // PROVISIONAL - pending GEN-PERF-1
 constexpr jlong kInvalidNativeHandle = 0;
+// PROVISIONAL - pending GEN-PERF-1
+constexpr uint32_t kMaximumBatchTokens = 512;
 
 bool shouldAbortDecode(void * data) {
     const auto * session = static_cast<const NativeSession *>(data);
@@ -362,12 +367,19 @@ jobject makeGenerationResult(
 } // namespace
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_inference_JniLlamaBridge_nativeLoadModel(JNIEnv * env, jobject, jstring modelPath, jint contextTokens) {
+Java_inference_JniLlamaBridge_nativeLoadModel(
+    JNIEnv * env,
+    jobject,
+    jstring modelPath,
+    jint contextTokens,
+    jint nThreads,
+    jint nThreadsBatch
+) {
     try {
         const std::string path = fromJavaString(env, modelPath);
         // PROVISIONAL - pending GEN-PERF-1
-        if (path.empty() || contextTokens <= 0) {
-            throw std::invalid_argument("A model path and positive context window are required");
+        if (path.empty() || contextTokens <= 0 || nThreads <= 0 || nThreadsBatch <= 0) {
+            throw std::invalid_argument("A model path, context window, and positive thread counts are required");
         }
         std::call_once(backendInitFlag, [] { llama_backend_init(); });
 
@@ -383,7 +395,10 @@ Java_inference_JniLlamaBridge_nativeLoadModel(JNIEnv * env, jobject, jstring mod
 
         llama_context_params contextParams = llama_context_default_params();
         contextParams.n_ctx = static_cast<uint32_t>(contextTokens);
-        contextParams.n_batch = static_cast<uint32_t>(contextTokens);
+        contextParams.n_batch = std::min(static_cast<uint32_t>(contextTokens), kMaximumBatchTokens);
+        session->batchTokens = contextParams.n_batch;
+        contextParams.n_threads = static_cast<int32_t>(nThreads);
+        contextParams.n_threads_batch = static_cast<int32_t>(nThreadsBatch);
         contextParams.abort_callback = shouldAbortDecode;
         contextParams.abort_callback_data = session.get();
         contextParams.offload_kqv = false;
@@ -403,6 +418,25 @@ Java_inference_JniLlamaBridge_nativeLoadModel(JNIEnv * env, jobject, jstring mod
     }
     // PROVISIONAL - pending GEN-PERF-1
     return kInvalidNativeHandle;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_inference_JniLlamaBridge_nativeSystemInfo(JNIEnv * env, jobject) {
+    try {
+        std::call_once(backendInitFlag, [] { llama_backend_init(); });
+        const char * systemInfo = llama_print_system_info();
+        if (systemInfo == nullptr) {
+            throw std::runtime_error("CPU system information was unavailable");
+        }
+        return toJavaString(env, std::string(systemInfo));
+    } catch (const std::bad_alloc &) {
+        throwJava(env, "java/lang/OutOfMemoryError", "CPU system information could not be allocated");
+    } catch (const std::exception &) {
+        throwJava(env, "java/lang/IllegalStateException", "CPU system information is unavailable");
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "CPU system information is unavailable");
+    }
+    return nullptr;
 }
 
 extern "C" JNIEXPORT jobject JNICALL
@@ -449,11 +483,19 @@ Java_inference_JniLlamaBridge_nativeGenerate(
 
         llama_memory_clear(llama_get_memory(session->context), true);
         // Pinned b11669 llama_batch_compat supplies the missing sequence, position, and output metadata.
-        const llama_batch promptBatch = llama_batch_get_one(
-            promptTokens.data(),
-            static_cast<int32_t>(promptTokens.size())
-        );
-        checkDecodeStatus(llama_decode(session->context, promptBatch));
+        // PROVISIONAL - pending GEN-PERF-1
+        for (size_t promptOffset = 0; promptOffset < promptTokens.size();) {
+            const size_t batchTokenCount = std::min<size_t>(
+                static_cast<size_t>(session->batchTokens),
+                promptTokens.size() - promptOffset
+            );
+            const llama_batch promptBatch = llama_batch_get_one(
+                promptTokens.data() + promptOffset,
+                static_cast<int32_t>(batchTokenCount)
+            );
+            checkDecodeStatus(llama_decode(session->context, promptBatch));
+            promptOffset += batchTokenCount;
+        }
 
         llama_sampler_chain_params samplerParams = llama_sampler_chain_default_params();
         samplerParams.no_perf = true;

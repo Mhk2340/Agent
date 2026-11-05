@@ -27,6 +27,8 @@ set(LLAMA_OPENSSL OFF CACHE BOOL "No network/TLS support is needed in the on-dev
 
 set(GGML_CPU ON CACHE BOOL "Enable the CPU backend" FORCE)
 set(GGML_NATIVE OFF CACHE BOOL "Do not tune for the GitHub runner CPU" FORCE)
+# // PROVISIONAL - pending GEN-PERF-1: requires fail-closed asimddp and asimdhp runtime guards.
+set(GGML_CPU_ARM_ARCH "armv8.2-a+dotprod+fp16" CACHE STRING "ARM64 CPU architecture for the guarded local runtime" FORCE)
 set(GGML_CPU_ALL_VARIANTS OFF CACHE BOOL "Build one generic arm64 CPU backend" FORCE)
 set(GGML_BACKEND_DL OFF CACHE BOOL "Link the CPU backend into the JNI library" FORCE)
 set(GGML_OPENMP OFF CACHE BOOL "Avoid an additional OpenMP runtime" FORCE)

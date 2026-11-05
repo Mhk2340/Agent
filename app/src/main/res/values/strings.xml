@@ -47,15 +47,14 @@
     <string name="local_model_self_test_succeeded">Local model self-test succeeded.</string>
     <string name="local_model_self_test_failed">Local model self-test failed.</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_load_time">Model load time — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d ms</string>
+    <string name="local_model_self_test_n_threads">n_threads — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_prompt_tokens">Formatted prompt token count — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
     <string name="local_model_self_test_first_token_time">Time to first token — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d ms</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
     <string name="local_model_self_test_tokens_per_second">Generated tokens per second — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$.2f</string>
-    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_token_count">Generated token count — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d</string>
-    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_peak_memory">Peak process PSS — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d KB</string>
+    <string name="local_model_self_test_system_info">Library system_info: %1$s</string>
     <string name="model_import_picker_unavailable">A document picker is not available on this device.</string>
     <string name="model_import_auth_required">Unlock the app before importing a model.</string>
     <string name="provider_gemini">Gemini Free provider</string>

@@ -1,24 +1,23 @@
 package inference
 
-import android.os.Debug
 import contracts.GenerateParams
 import contracts.InferenceRequest
-import contracts.InferenceResponse
 import java.io.Closeable
-import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledExecutorService
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
-/** Carries only the CPU engine and timing values; generated text never enters this result type. */
-internal data class LocalModelSelfTestMetrics(
-    val modelLoadTimeMs: Long,
+/** One case contains only the approved numeric CPU measurements. */
+internal data class LocalModelSelfTestCaseMetrics(
+    val nThreads: Int,
+    val promptTokenCount: Int,
     val firstTokenTimeMs: Long,
-    val tokensPerSecond: Double,
-    val tokenCount: Int,
-    val peakPssKilobytes: Long
+    val tokensPerSecond: Double
+)
+
+/** The final library system_info string is shown after the complete thread sweep. */
+internal data class LocalModelSelfTestMetrics(
+    val cases: List<LocalModelSelfTestCaseMetrics>,
+    val systemInfo: String
 )
 
 internal sealed class LocalModelSelfTestOutcome {
@@ -56,6 +55,8 @@ internal class LocalModelSelfTestSession(
 ) : Closeable {
     fun latestMeasurements(): LlamaRuntimeMeasurements? = measurements.get()
 
+    fun systemInfo(): String = backend.systemInfo()
+
     fun requestAbort() {
         backend.requestAbortGeneration()
     }
@@ -66,78 +67,71 @@ internal class LocalModelSelfTestSession(
     }
 }
 
-fun interface ProcessPssProbe {
-    /** Returns total process PSS in KiB, or null when the operating system cannot sample it. */
-    fun currentPssKilobytes(): Long?
-}
-
-internal object AndroidProcessPssProbe : ProcessPssProbe {
-    override fun currentPssKilobytes(): Long? = runCatching {
-        val memoryInfo = Debug.MemoryInfo()
-        Debug.getMemoryInfo(memoryInfo)
-        memoryInfo.totalPss.toLong().takeIf { it >= 0L }
-    }.getOrNull()
-}
-
-/** Runs the fixed, no-tools prompt through LocalInferenceEngine and returns numeric-only results. */
+/** Runs one fixed, no-tools prompt at each approved thread count and retains no generated text. */
 internal class LocalModelSelfTestRunner(
-    private val sessionFactory: (LocalModelSelfTestCancellation) -> LocalModelSelfTestSession,
-    private val pssProbe: ProcessPssProbe,
+    private val sessionFactory: (LocalModelSelfTestCancellation, Int) -> LocalModelSelfTestSession,
     private val isEligible: () -> Boolean
 ) {
     fun run(cancellation: LocalModelSelfTestCancellation): LocalModelSelfTestOutcome {
         if (!canContinue(cancellation)) return LocalModelSelfTestOutcome.Failure
 
-        val memorySampler = PeakPssSampler(pssProbe)
-        var session: LocalModelSelfTestSession? = null
-        var sessionClosed = false
+        val caseMetrics = mutableListOf<LocalModelSelfTestCaseMetrics>()
+        var lastSession: LocalModelSelfTestSession? = null
         try {
-            memorySampler.start()
-            if (!canContinue(cancellation)) return LocalModelSelfTestOutcome.Failure
+            for (nThreads in THREAD_SWEEP) {
+                if (!canContinue(cancellation)) return LocalModelSelfTestOutcome.Failure
 
-            session = sessionFactory(cancellation)
-            cancellation.attachAbortHandler(session::requestAbort)
-            if (!canContinue(cancellation)) return LocalModelSelfTestOutcome.Failure
+                var session: LocalModelSelfTestSession? = null
+                try {
+                    session = sessionFactory(cancellation, nThreads)
+                    cancellation.attachAbortHandler(session::requestAbort)
+                    if (!canContinue(cancellation)) return LocalModelSelfTestOutcome.Failure
 
-            val response = session.inferenceEngine.generate(fixedRequest()).getOrNull()
-                ?: return LocalModelSelfTestOutcome.Failure
-            if (!canContinue(cancellation)) return LocalModelSelfTestOutcome.Failure
+                    val response = session.inferenceEngine.generate(fixedRequest()).getOrNull()
+                        ?: return LocalModelSelfTestOutcome.Failure
+                    if (!canContinue(cancellation)) return LocalModelSelfTestOutcome.Failure
 
-            val measurements = session.latestMeasurements()
-                ?: return LocalModelSelfTestOutcome.Failure
-            val generatedTokens = response.usage.completion_tokens
-            if (generatedTokens !in MIN_OUTPUT_TOKENS..MAX_OUTPUT_TOKENS ||
-                measurements.tokenCount != generatedTokens ||
-                measurements.modelLoadTimeMs < 0L ||
-                measurements.firstTokenTimeMs < 0L ||
-                !measurements.tokensPerSecond.isFinite() ||
-                measurements.tokensPerSecond < 0.0
-            ) {
-                return LocalModelSelfTestOutcome.Failure
+                    val measurements = session.latestMeasurements()
+                        ?: return LocalModelSelfTestOutcome.Failure
+                    val promptTokens = response.usage.prompt_tokens
+                    val generatedTokens = response.usage.completion_tokens
+                    // PROVISIONAL - pending GEN-PERF-1
+                    if (promptTokens < MIN_PROMPT_TOKENS ||
+                        generatedTokens !in MIN_OUTPUT_TOKENS..MAX_OUTPUT_TOKENS ||
+                        measurements.tokenCount != generatedTokens ||
+                        measurements.firstTokenTimeMs < 0L ||
+                        !measurements.tokensPerSecond.isFinite() ||
+                        measurements.tokensPerSecond <= 0.0
+                    ) {
+                        return LocalModelSelfTestOutcome.Failure
+                    }
+
+                    caseMetrics += LocalModelSelfTestCaseMetrics(
+                        nThreads = nThreads,
+                        promptTokenCount = promptTokens,
+                        firstTokenTimeMs = measurements.firstTokenTimeMs,
+                        tokensPerSecond = measurements.tokensPerSecond
+                    )
+                    lastSession = session
+                } finally {
+                    runCatching { session?.close() }
+                }
             }
 
-            val peakPss = memorySampler.finishAndGet()
-                ?: return LocalModelSelfTestOutcome.Failure
             if (!canContinue(cancellation)) return LocalModelSelfTestOutcome.Failure
-
-            session.close()
-            sessionClosed = true
+            val systemInfo = lastSession?.systemInfo()?.takeIf(String::isNotBlank)
+                ?: return LocalModelSelfTestOutcome.Failure
             if (!canContinue(cancellation)) return LocalModelSelfTestOutcome.Failure
 
             return LocalModelSelfTestOutcome.Success(
                 LocalModelSelfTestMetrics(
-                    modelLoadTimeMs = measurements.modelLoadTimeMs,
-                    firstTokenTimeMs = measurements.firstTokenTimeMs,
-                    tokensPerSecond = measurements.tokensPerSecond,
-                    tokenCount = generatedTokens,
-                    peakPssKilobytes = peakPss
+                    cases = caseMetrics.toList(),
+                    systemInfo = systemInfo
                 )
             )
         } catch (_: Throwable) {
             return LocalModelSelfTestOutcome.Failure
         } finally {
-            if (!sessionClosed) runCatching { session?.close() }
-            memorySampler.close()
             cancellation.clearAbortHandler()
         }
     }
@@ -155,54 +149,15 @@ internal class LocalModelSelfTestRunner(
         )
     )
 
-    private class PeakPssSampler(private val probe: ProcessPssProbe) : Closeable {
-        private val peakPss = AtomicLong(NO_PSS_SAMPLE)
-        @Volatile
-        private var scheduler: ScheduledExecutorService? = null
-        @Volatile
-        private var stopped = false
-
-        fun start() {
-            sample()
-            val executor = Executors.newSingleThreadScheduledExecutor { task ->
-                Thread(task, "local-model-self-test-memory-sampler").apply { isDaemon = true }
-            }
-            scheduler = executor
-            // PROVISIONAL - pending GEN-PERF-1
-            executor.scheduleAtFixedRate(::sample, PSS_SAMPLE_INTERVAL_MS, PSS_SAMPLE_INTERVAL_MS, TimeUnit.MILLISECONDS)
-        }
-
-        fun finishAndGet(): Long? {
-            if (!stopped) {
-                sample()
-                stopped = true
-                scheduler?.shutdownNow()
-                scheduler = null
-            }
-            return peakPss.get().takeIf { it != NO_PSS_SAMPLE }
-        }
-
-        private fun sample() {
-            if (stopped) return
-            val measured = runCatching { probe.currentPssKilobytes() }.getOrNull() ?: return
-            if (measured < 0L) return
-            peakPss.updateAndGet { previous -> maxOf(previous, measured) }
-        }
-
-        override fun close() {
-            finishAndGet()
-        }
-    }
-
     private companion object {
         // PROVISIONAL - pending GEN-PERF-1
-        const val MAX_OUTPUT_TOKENS = 32
+        val THREAD_SWEEP = intArrayOf(2, 4, 6)
+        // PROVISIONAL - pending GEN-PERF-1
+        const val MAX_OUTPUT_TOKENS = 8
         // PROVISIONAL - pending GEN-PERF-1
         const val MIN_OUTPUT_TOKENS = 1
         // PROVISIONAL - pending GEN-PERF-1
-        const val PSS_SAMPLE_INTERVAL_MS = 100L
-        // PROVISIONAL - pending GEN-PERF-1
-        const val NO_PSS_SAMPLE = -1L
+        const val MIN_PROMPT_TOKENS = 1
         // PROVISIONAL - pending GEN-PERF-1
         const val SELF_TEST_TEMPERATURE = 0.0f
         // PROVISIONAL - pending GEN-PERF-1

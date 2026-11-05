@@ -191,12 +191,15 @@ class AgentContainer(
 
     /** Creates a disposable, diagnostics-free backend while preserving the normal InferenceEngine route. */
     internal fun createLocalModelSelfTestSession(
-        cancellation: LocalModelSelfTestCancellation
+        cancellation: LocalModelSelfTestCancellation,
+        nThreads: Int
     ): LocalModelSelfTestSession {
         val measurements = AtomicReference<LlamaRuntimeMeasurements?>(null)
         val backend = LlamaCppInferenceBackend(
-            localModelAssetStore,
-            localInferenceBudgetPolicy.maxContextTokens
+            modelAssetStore = localModelAssetStore,
+            contextTokens = localInferenceBudgetPolicy.maxContextTokens,
+            nThreads = nThreads,
+            nThreadsBatch = nThreads
         )
         val engine = LocalInferenceEngine(
             budgetPolicy = localInferenceBudgetPolicy,

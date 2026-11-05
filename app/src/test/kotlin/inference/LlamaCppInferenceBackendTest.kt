@@ -34,13 +34,30 @@ class LlamaCppInferenceBackendTest {
         var recordedPrompt: String? = null
         var recordedGrammar: String? = null
         var recordedMaxTokens: Int? = null
+        val recordedThreadCounts = mutableListOf<Int>()
+        val recordedBatchThreadCounts = mutableListOf<Int>()
+        val recordedMaxTokenBudgets = mutableListOf<Int>()
+        var systemInfoCalls = INITIAL_CALL_COUNT
+        var fakeSystemInfo = "Fake CPU system info"
         var loadOverride: (() -> Long)? = null
         var generateOverride: (() -> NativeGenerationResult)? = null
         var cancelOverride: (() -> Unit)? = null
 
-        override fun loadModel(modelPath: String, contextTokens: Int): Long {
+        override fun loadModel(
+            modelPath: String,
+            contextTokens: Int,
+            nThreads: Int,
+            nThreadsBatch: Int
+        ): Long {
             loadCalls += CALL_COUNT_INCREMENT
+            recordedThreadCounts += nThreads
+            recordedBatchThreadCounts += nThreadsBatch
             return loadOverride?.invoke() ?: FAKE_NATIVE_HANDLE
+        }
+
+        override fun systemInfo(): String {
+            systemInfoCalls += CALL_COUNT_INCREMENT
+            return fakeSystemInfo
         }
 
         override fun generate(
@@ -57,6 +74,7 @@ class LlamaCppInferenceBackendTest {
             recordedPrompt = prompt
             recordedGrammar = grammar
             recordedMaxTokens = maxTokens
+            recordedMaxTokenBudgets += maxTokens
             return generateOverride?.invoke() ?: NativeGenerationResult(
                 "native output",
                 promptTokens = FAKE_PROMPT_TOKEN_COUNT,
@@ -152,28 +170,36 @@ class LlamaCppInferenceBackendTest {
     }
 
     @Test
-    fun selfTestUsesInferenceEngineWithFixedPromptAndDiscardsGeneratedText() {
+    fun selfTestSweepsThreadCountsAndRetainsOnlyApprovedMeasurements() {
         val bridge = FakeBridge()
         val outcome = selfTestRunner(installedStore(), bridge).run(LocalModelSelfTestCancellation())
 
         assertTrue(outcome is LocalModelSelfTestOutcome.Success)
         assertEquals(LOCAL_SELF_TEST_MAX_OUTPUT_TOKENS, bridge.recordedMaxTokens)
+        assertEquals(listOf(LOCAL_SELF_TEST_MAX_OUTPUT_TOKENS, LOCAL_SELF_TEST_MAX_OUTPUT_TOKENS, LOCAL_SELF_TEST_MAX_OUTPUT_TOKENS), bridge.recordedMaxTokenBudgets)
         assertEquals("Say hello in a few words.", bridge.recordedPrompt)
         assertEquals(
             "Local runtime self-test only. Reply with a short harmless greeting. Do not use tools or take actions.",
             bridge.recordedContext
         )
-        assertEquals(SINGLE_CALL_COUNT, bridge.loadCalls)
-        assertEquals(SINGLE_CALL_COUNT, bridge.releaseCalls)
+        assertEquals(SELF_TEST_THREAD_COUNTS, bridge.recordedThreadCounts)
+        assertEquals(SELF_TEST_THREAD_COUNTS, bridge.recordedBatchThreadCounts)
+        assertEquals(SELF_TEST_THREAD_COUNTS.size, bridge.loadCalls)
+        assertEquals(SELF_TEST_THREAD_COUNTS.size, bridge.releaseCalls)
+        assertEquals(SINGLE_CALL_COUNT, bridge.systemInfoCalls)
         assertFalse(outcome.toString().contains("native output"))
 
         val metrics = (outcome as LocalModelSelfTestOutcome.Success).metrics
-        assertEquals(FAKE_COMPLETION_TOKEN_COUNT, metrics.tokenCount)
-        assertTrue(metrics.tokenCount in LOCAL_SELF_TEST_MIN_OUTPUT_TOKENS..LOCAL_SELF_TEST_MAX_OUTPUT_TOKENS)
-        assertEquals(FAKE_PEAK_PSS_KILOBYTES, metrics.peakPssKilobytes)
-        assertTrue(metrics.modelLoadTimeMs >= 0L)
-        assertTrue(metrics.firstTokenTimeMs > 0L)
-        assertTrue(metrics.tokensPerSecond > 0.0)
+        assertEquals(SELF_TEST_THREAD_COUNTS, metrics.cases.map { it.nThreads })
+        assertEquals(
+            listOf(FAKE_PROMPT_TOKEN_COUNT, FAKE_PROMPT_TOKEN_COUNT, FAKE_PROMPT_TOKEN_COUNT),
+            metrics.cases.map { it.promptTokenCount }
+        )
+        // PROVISIONAL - pending GEN-PERF-1
+        assertTrue(metrics.cases.all { it.firstTokenTimeMs > 0L })
+        // PROVISIONAL - pending GEN-PERF-1
+        assertTrue(metrics.cases.all { it.tokensPerSecond > 0.0 })
+        assertEquals(bridge.fakeSystemInfo, metrics.systemInfo)
     }
 
     @Test
@@ -272,12 +298,14 @@ class LlamaCppInferenceBackendTest {
         bridge: FakeBridge,
         isEligible: () -> Boolean = { true }
     ): LocalModelSelfTestRunner = LocalModelSelfTestRunner(
-        sessionFactory = { cancellation ->
+        sessionFactory = { cancellation, nThreads ->
             val measurements = AtomicReference<LlamaRuntimeMeasurements?>(null)
             val backend = LlamaCppInferenceBackend(
-                store,
-                ContextWindowBudgetPolicy().maxContextTokens,
-                bridge
+                modelAssetStore = store,
+                contextTokens = ContextWindowBudgetPolicy().maxContextTokens,
+                bridge = bridge,
+                nThreads = nThreads,
+                nThreadsBatch = nThreads
             )
             val engine = LocalInferenceEngine(
                 delegateBackendExecutor = InferenceDelegateExecutor { delegate, inferenceRequest ->
@@ -299,7 +327,6 @@ class LlamaCppInferenceBackendTest {
                 cancellation.attachAbortHandler(session::requestAbort)
             }
         },
-        pssProbe = ProcessPssProbe { FAKE_PEAK_PSS_KILOBYTES },
         isEligible = isEligible
     )
 
@@ -345,11 +372,9 @@ class LlamaCppInferenceBackendTest {
         // PROVISIONAL - pending GEN-PERF-1
         const val FAKE_GENERATION_ELAPSED_NANOS = 40_000_000L
         // PROVISIONAL - pending GEN-PERF-1
-        const val FAKE_PEAK_PSS_KILOBYTES = 64_000L
+        val SELF_TEST_THREAD_COUNTS = listOf(2, 4, 6)
         // PROVISIONAL - pending GEN-PERF-1
-        const val LOCAL_SELF_TEST_MAX_OUTPUT_TOKENS = 32
-        // PROVISIONAL - pending GEN-PERF-1
-        const val LOCAL_SELF_TEST_MIN_OUTPUT_TOKENS = 1
+        const val LOCAL_SELF_TEST_MAX_OUTPUT_TOKENS = 8
         // PROVISIONAL - pending GEN-PERF-1
         const val WAIT_TIMEOUT_SECONDS = 5L
         // PROVISIONAL - pending GEN-PERF-1

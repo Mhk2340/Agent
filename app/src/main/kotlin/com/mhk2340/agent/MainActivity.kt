@@ -16,7 +16,6 @@ import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
-import inference.AndroidProcessPssProbe
 import inference.LocalModelSelfTestCancellation
 import inference.LocalModelSelfTestOutcome
 import inference.LocalModelSelfTestRunner
@@ -63,7 +62,7 @@ class MainActivity : Activity() {
         // PROVISIONAL - pending GEN-PERF-1
         const val MODEL_IMPORT_REQUEST_CODE = 0x4d49
         // PROVISIONAL - pending GEN-PERF-1
-        const val LOCAL_MODEL_SELF_TEST_TIMEOUT_MS = 300_000L
+        const val LOCAL_MODEL_SELF_TEST_TIMEOUT_MS = 600_000L
         // PROVISIONAL - pending GEN-PERF-1
         const val LOCAL_MODEL_SELF_TEST_ELIGIBILITY_POLL_MS = 250L
     }
@@ -474,8 +473,9 @@ class MainActivity : Activity() {
         try {
             localModelSelfTestWorker.execute {
                 val outcome = LocalModelSelfTestRunner(
-                    sessionFactory = container::createLocalModelSelfTestSession,
-                    pssProbe = AndroidProcessPssProbe,
+                    sessionFactory = { currentCancellation, nThreads ->
+                        container.createLocalModelSelfTestSession(currentCancellation, nThreads)
+                    },
                     isEligible = { isLocalModelSelfTestEligible(container) }
                 ).run(cancellation)
                 runOnUiThread { completeLocalModelSelfTest(container, cancellation, outcome) }
@@ -559,13 +559,18 @@ class MainActivity : Activity() {
                 val metrics = result.metrics
                 status.setText(R.string.local_model_self_test_succeeded)
                 status.visibility = View.VISIBLE
-                metricsView.text = listOf(
-                    getString(R.string.local_model_self_test_load_time, metrics.modelLoadTimeMs),
-                    getString(R.string.local_model_self_test_first_token_time, metrics.firstTokenTimeMs),
-                    getString(R.string.local_model_self_test_tokens_per_second, metrics.tokensPerSecond),
-                    getString(R.string.local_model_self_test_token_count, metrics.tokenCount),
-                    getString(R.string.local_model_self_test_peak_memory, metrics.peakPssKilobytes)
-                ).joinToString("\n")
+                val caseLines = metrics.cases.flatMap { case ->
+                    listOf(
+                        getString(R.string.local_model_self_test_n_threads, case.nThreads),
+                        getString(R.string.local_model_self_test_prompt_tokens, case.promptTokenCount),
+                        getString(R.string.local_model_self_test_first_token_time, case.firstTokenTimeMs),
+                        getString(R.string.local_model_self_test_tokens_per_second, case.tokensPerSecond)
+                    )
+                }
+                metricsView.text = (caseLines + getString(
+                    R.string.local_model_self_test_system_info,
+                    metrics.systemInfo
+                )).joinToString("\n")
                 metricsView.visibility = View.VISIBLE
             }
         }
