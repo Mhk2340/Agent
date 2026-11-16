@@ -42,6 +42,20 @@ class LlamaCppInferenceBackendTest {
         var loadOverride: (() -> Long)? = null
         var generateOverride: (() -> NativeGenerationResult)? = null
         var cancelOverride: (() -> Unit)? = null
+        var fakeAllowedCores = FAKE_BASELINE_CORES
+        var rejectedAffinityMasks: Set<List<Int>> = emptySet()
+        var effectiveAffinityOverrides: Map<List<Int>, List<Int>> = emptyMap()
+        val loadedAffinityMasks = mutableListOf<List<Int>>()
+        val generatedAffinityMasks = mutableListOf<List<Int>>()
+
+        override fun currentThreadAffinity(): IntArray? = fakeAllowedCores.toIntArray()
+
+        override fun setThreadAffinity(cpuIds: IntArray): Boolean {
+            val requested = cpuIds.toList().distinct().sorted()
+            if (requested in rejectedAffinityMasks) return false
+            fakeAllowedCores = effectiveAffinityOverrides[requested] ?: requested
+            return true
+        }
 
         override fun loadModel(
             modelPath: String,
@@ -52,6 +66,7 @@ class LlamaCppInferenceBackendTest {
             loadCalls += CALL_COUNT_INCREMENT
             recordedThreadCounts += nThreads
             recordedBatchThreadCounts += nThreadsBatch
+            loadedAffinityMasks += fakeAllowedCores
             return loadOverride?.invoke() ?: FAKE_NATIVE_HANDLE
         }
 
@@ -70,6 +85,7 @@ class LlamaCppInferenceBackendTest {
             grammar: String?
         ): NativeGenerationResult {
             generateCalls += CALL_COUNT_INCREMENT
+            generatedAffinityMasks += fakeAllowedCores
             recordedContext = context
             recordedPrompt = prompt
             recordedGrammar = grammar
@@ -170,13 +186,13 @@ class LlamaCppInferenceBackendTest {
     }
 
     @Test
-    fun selfTestSweepsThreadCountsAndRetainsOnlyApprovedMeasurements() {
+    fun selfTestRunsABCCBAWithAffinityAppliedBeforeModelLoadAndKeepsEachSampleSeparate() {
         val bridge = FakeBridge()
         val outcome = selfTestRunner(installedStore(), bridge).run(LocalModelSelfTestCancellation())
 
         assertTrue(outcome is LocalModelSelfTestOutcome.Success)
         assertEquals(LOCAL_SELF_TEST_MAX_OUTPUT_TOKENS, bridge.recordedMaxTokens)
-        assertEquals(listOf(LOCAL_SELF_TEST_MAX_OUTPUT_TOKENS, LOCAL_SELF_TEST_MAX_OUTPUT_TOKENS, LOCAL_SELF_TEST_MAX_OUTPUT_TOKENS), bridge.recordedMaxTokenBudgets)
+        assertEquals(List(SELF_TEST_RUN_NUMBERS.size) { LOCAL_SELF_TEST_MAX_OUTPUT_TOKENS }, bridge.recordedMaxTokenBudgets)
         assertEquals("Say hello in a few words.", bridge.recordedPrompt)
         assertEquals(
             "Local runtime self-test only. Reply with a short harmless greeting. Do not use tools or take actions.",
@@ -184,22 +200,154 @@ class LlamaCppInferenceBackendTest {
         )
         assertEquals(SELF_TEST_THREAD_COUNTS, bridge.recordedThreadCounts)
         assertEquals(SELF_TEST_THREAD_COUNTS, bridge.recordedBatchThreadCounts)
-        assertEquals(SELF_TEST_THREAD_COUNTS.size, bridge.loadCalls)
-        assertEquals(SELF_TEST_THREAD_COUNTS.size, bridge.releaseCalls)
+        assertEquals(SELF_TEST_RUN_NUMBERS.size, bridge.loadCalls)
+        assertEquals(SELF_TEST_RUN_NUMBERS.size, bridge.releaseCalls)
         assertEquals(SINGLE_CALL_COUNT, bridge.systemInfoCalls)
         assertFalse(outcome.toString().contains("native output"))
 
         val metrics = (outcome as LocalModelSelfTestOutcome.Success).metrics
+        assertEquals(SELF_TEST_CONFIGURATION_ORDER, metrics.cases.map { it.configuration })
+        assertEquals(SELF_TEST_RUN_NUMBERS, metrics.cases.map { it.runNumber })
         assertEquals(SELF_TEST_THREAD_COUNTS, metrics.cases.map { it.nThreads })
         assertEquals(
-            listOf(FAKE_PROMPT_TOKEN_COUNT, FAKE_PROMPT_TOKEN_COUNT, FAKE_PROMPT_TOKEN_COUNT),
+            List(SELF_TEST_RUN_NUMBERS.size) { FAKE_PROMPT_TOKEN_COUNT },
             metrics.cases.map { it.promptTokenCount }
         )
         // PROVISIONAL - pending GEN-PERF-1
-        assertTrue(metrics.cases.all { it.firstTokenTimeMs > 0L })
+        assertTrue(metrics.cases.all { (it.firstTokenTimeMs ?: 0L) > 0L })
         // PROVISIONAL - pending GEN-PERF-1
-        assertTrue(metrics.cases.all { it.tokensPerSecond > 0.0 })
+        assertTrue(metrics.cases.all { (it.tokensPerSecond ?: 0.0) > 0.0 })
+        assertEquals(listOf(FAKE_STRONG_CORE_IDS.first()), metrics.cases.first().allowedCoreIds)
+        assertEquals(
+            FAKE_STRONG_CORE_IDS,
+            metrics.cases.first { it.configuration == LocalModelSelfTestConfiguration.B }.allowedCoreIds
+        )
+        assertEquals(
+            FAKE_BASELINE_CORES,
+            metrics.cases.first { it.configuration == LocalModelSelfTestConfiguration.C }.allowedCoreIds
+        )
+        assertEquals(SELF_TEST_ALLOWED_MASKS, bridge.loadedAffinityMasks)
+        assertEquals(SELF_TEST_ALLOWED_MASKS, bridge.generatedAffinityMasks)
+        assertEquals(
+            listOf(
+                LocalModelSelfTestRunStatus.PINNED,
+                LocalModelSelfTestRunStatus.PINNED,
+                LocalModelSelfTestRunStatus.UNPINNED,
+                LocalModelSelfTestRunStatus.UNPINNED,
+                LocalModelSelfTestRunStatus.PINNED,
+                LocalModelSelfTestRunStatus.PINNED
+            ),
+            metrics.cases.map { it.status }
+        )
         assertEquals(bridge.fakeSystemInfo, metrics.systemInfo)
+    }
+
+    @Test
+    fun failedPinsAreMarkedAndDoNotAbortTheRemainingSweep() {
+        val bridge = FakeBridge().apply {
+            rejectedAffinityMasks = setOf(
+                listOf(FAKE_STRONG_CORE_IDS.first()),
+                FAKE_STRONG_CORE_IDS
+            )
+        }
+
+        val outcome = selfTestRunner(installedStore(), bridge).run(LocalModelSelfTestCancellation())
+
+        assertTrue(outcome is LocalModelSelfTestOutcome.Success)
+        val cases = (outcome as LocalModelSelfTestOutcome.Success).metrics.cases
+        assertEquals(SELF_TEST_RUN_NUMBERS.size, bridge.generateCalls)
+        assertEquals(
+            listOf(
+                LocalModelSelfTestRunStatus.PIN_FAILED,
+                LocalModelSelfTestRunStatus.PIN_FAILED,
+                LocalModelSelfTestRunStatus.UNPINNED,
+                LocalModelSelfTestRunStatus.UNPINNED,
+                LocalModelSelfTestRunStatus.PIN_FAILED,
+                LocalModelSelfTestRunStatus.PIN_FAILED
+            ),
+            cases.map { it.status }
+        )
+        assertEquals(FAKE_BASELINE_CORES, cases.first().allowedCoreIds)
+        assertEquals(FAKE_BASELINE_CORES, bridge.fakeAllowedCores)
+    }
+
+    @Test
+    fun effectiveAffinityIsReadBackAndARestrictedMaskIsReportedAsPinFailed() {
+        val bridge = FakeBridge().apply {
+            effectiveAffinityOverrides = mapOf(FAKE_STRONG_CORE_IDS to listOf(FAKE_STRONG_CORE_IDS.first()))
+        }
+
+        val outcome = selfTestRunner(installedStore(), bridge).run(LocalModelSelfTestCancellation())
+
+        assertTrue(outcome is LocalModelSelfTestOutcome.Success)
+        val cases = (outcome as LocalModelSelfTestOutcome.Success).metrics.cases
+        val firstB = cases.first { it.configuration == LocalModelSelfTestConfiguration.B }
+        assertEquals(LocalModelSelfTestRunStatus.PIN_FAILED, firstB.status)
+        assertEquals(listOf(FAKE_STRONG_CORE_IDS.first()), firstB.allowedCoreIds)
+        assertEquals(SELF_TEST_RUN_NUMBERS.size, bridge.generateCalls)
+        assertEquals(FAKE_BASELINE_CORES, bridge.fakeAllowedCores)
+    }
+
+    @Test
+    fun missingCpuFrequencyDataSkipsOnlyPinnedRunsAndKeepsUnpinnedSamples() {
+        val bridge = FakeBridge()
+        val waitCalls = mutableListOf<Boolean>()
+        val outcome = selfTestRunner(
+            store = installedStore(),
+            bridge = bridge,
+            strongCoreIdsProvider = { null },
+            waitBetweenRuns = { waitCalls += true; true }
+        ).run(LocalModelSelfTestCancellation())
+
+        assertTrue(outcome is LocalModelSelfTestOutcome.Success)
+        val cases = (outcome as LocalModelSelfTestOutcome.Success).metrics.cases
+        assertEquals(SELF_TEST_RUN_NUMBERS.size, cases.size)
+        assertEquals(
+            listOf(
+                LocalModelSelfTestRunStatus.CPU_FREQUENCY_UNAVAILABLE,
+                LocalModelSelfTestRunStatus.CPU_FREQUENCY_UNAVAILABLE,
+                LocalModelSelfTestRunStatus.UNPINNED,
+                LocalModelSelfTestRunStatus.UNPINNED,
+                LocalModelSelfTestRunStatus.CPU_FREQUENCY_UNAVAILABLE,
+                LocalModelSelfTestRunStatus.CPU_FREQUENCY_UNAVAILABLE
+            ),
+            cases.map { it.status }
+        )
+        assertEquals(listOf(null, null, FAKE_PROMPT_TOKEN_COUNT, FAKE_PROMPT_TOKEN_COUNT, null, null),
+            cases.map { it.promptTokenCount })
+        assertEquals(UNPINNED_CASE_COUNT, bridge.generateCalls)
+        assertEquals(SINGLE_COOLDOWN_WAIT_COUNT, waitCalls.size)
+        assertEquals(
+            FAKE_BASELINE_CORES,
+            cases.first { it.configuration == LocalModelSelfTestConfiguration.C }.allowedCoreIds
+        )
+    }
+
+    @Test
+    fun cancellationDuringCooldownWakesTheRunnerAndLeavesBaselineAffinityRestored() {
+        val bridge = FakeBridge()
+        val cooldownStarted = CountDownLatch(CALL_COUNT_INCREMENT)
+        val cancellation = LocalModelSelfTestCancellation()
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val future = executor.submit<LocalModelSelfTestOutcome> {
+                selfTestRunner(
+                    store = installedStore(),
+                    bridge = bridge,
+                    waitBetweenRuns = { currentCancellation ->
+                        cooldownStarted.countDown()
+                        !currentCancellation.awaitCancellation(WAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                    }
+                ).run(cancellation)
+            }
+            assertTrue(cooldownStarted.await(WAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+            cancellation.cancel()
+            assertEquals(LocalModelSelfTestOutcome.Failure, future.get(WAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+            assertEquals(SINGLE_CALL_COUNT, bridge.generateCalls)
+            assertEquals(FAKE_BASELINE_CORES, bridge.fakeAllowedCores)
+        } finally {
+            executor.shutdownNow()
+        }
     }
 
     @Test
@@ -296,7 +444,9 @@ class LlamaCppInferenceBackendTest {
     private fun selfTestRunner(
         store: ModelAssetStore,
         bridge: FakeBridge,
-        isEligible: () -> Boolean = { true }
+        isEligible: () -> Boolean = { true },
+        strongCoreIdsProvider: () -> List<Int>? = { FAKE_STRONG_CORE_IDS },
+        waitBetweenRuns: (LocalModelSelfTestCancellation) -> Boolean = { true }
     ): LocalModelSelfTestRunner = LocalModelSelfTestRunner(
         sessionFactory = { cancellation, nThreads ->
             val measurements = AtomicReference<LlamaRuntimeMeasurements?>(null)
@@ -327,7 +477,9 @@ class LlamaCppInferenceBackendTest {
                 cancellation.attachAbortHandler(session::requestAbort)
             }
         },
-        isEligible = isEligible
+        isEligible = isEligible,
+        strongCoreIdsProvider = strongCoreIdsProvider,
+        waitBetweenRuns = waitBetweenRuns
     )
 
     private fun installedStore(): ModelAssetStore {
@@ -371,8 +523,36 @@ class LlamaCppInferenceBackendTest {
         const val FAKE_FIRST_TOKEN_ELAPSED_NANOS = 10_000_000L
         // PROVISIONAL - pending GEN-PERF-1
         const val FAKE_GENERATION_ELAPSED_NANOS = 40_000_000L
+        // PROVISIONAL - pending GEN-PERF-1: arbitrary fixture CPU IDs, not device-specific assignments.
+        val FAKE_BASELINE_CORES = listOf(101, 102, 103, 104)
+        // PROVISIONAL - pending GEN-PERF-1: arbitrary fixture IDs standing in for discovered top-frequency cores.
+        val FAKE_STRONG_CORE_IDS = listOf(201, 202)
         // PROVISIONAL - pending GEN-PERF-1
-        val SELF_TEST_THREAD_COUNTS = listOf(2, 4, 6)
+        val SELF_TEST_CONFIGURATION_ORDER = listOf(
+            LocalModelSelfTestConfiguration.A,
+            LocalModelSelfTestConfiguration.B,
+            LocalModelSelfTestConfiguration.C,
+            LocalModelSelfTestConfiguration.C,
+            LocalModelSelfTestConfiguration.B,
+            LocalModelSelfTestConfiguration.A
+        )
+        // PROVISIONAL - pending GEN-PERF-1
+        val SELF_TEST_RUN_NUMBERS = listOf(1, 2, 3, 4, 5, 6)
+        // PROVISIONAL - pending GEN-PERF-1
+        val SELF_TEST_THREAD_COUNTS = listOf(1, 2, 2, 2, 2, 1)
+        // PROVISIONAL - pending GEN-PERF-1
+        val SELF_TEST_ALLOWED_MASKS = listOf(
+            listOf(FAKE_STRONG_CORE_IDS.first()),
+            FAKE_STRONG_CORE_IDS,
+            FAKE_BASELINE_CORES,
+            FAKE_BASELINE_CORES,
+            FAKE_STRONG_CORE_IDS,
+            listOf(FAKE_STRONG_CORE_IDS.first())
+        )
+        // PROVISIONAL - pending GEN-PERF-1
+        const val UNPINNED_CASE_COUNT = 2
+        // PROVISIONAL - pending GEN-PERF-1
+        const val SINGLE_COOLDOWN_WAIT_COUNT = 1
         // PROVISIONAL - pending GEN-PERF-1
         const val LOCAL_SELF_TEST_MAX_OUTPUT_TOKENS = 8
         // PROVISIONAL - pending GEN-PERF-1

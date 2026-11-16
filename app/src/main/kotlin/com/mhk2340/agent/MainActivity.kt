@@ -62,7 +62,7 @@ class MainActivity : Activity() {
         // PROVISIONAL - pending GEN-PERF-1
         const val MODEL_IMPORT_REQUEST_CODE = 0x4d49
         // PROVISIONAL - pending GEN-PERF-1
-        const val LOCAL_MODEL_SELF_TEST_TIMEOUT_MS = 600_000L
+        const val LOCAL_MODEL_SELF_TEST_TIMEOUT_MS = 900_000L
         // PROVISIONAL - pending GEN-PERF-1
         const val LOCAL_MODEL_SELF_TEST_ELIGIBILITY_POLL_MS = 250L
     }
@@ -559,12 +559,31 @@ class MainActivity : Activity() {
                 val metrics = result.metrics
                 status.setText(R.string.local_model_self_test_succeeded)
                 status.visibility = View.VISIBLE
+                val unavailable = getString(R.string.local_model_self_test_value_unavailable)
                 val caseLines = metrics.cases.flatMap { case ->
+                    val allowedCores = case.allowedCoreIds?.joinToString(prefix = "[", postfix = "]")
+                        ?: unavailable
+                    val promptTokensLine = case.promptTokenCount?.let {
+                        getString(R.string.local_model_self_test_prompt_tokens, it)
+                    } ?: getString(R.string.local_model_self_test_prompt_tokens_unavailable)
+                    val firstTokenLine = case.firstTokenTimeMs?.let {
+                        getString(R.string.local_model_self_test_first_token_time, it)
+                    } ?: getString(R.string.local_model_self_test_first_token_time_unavailable)
+                    val tokenRateLine = case.tokensPerSecond?.let {
+                        getString(R.string.local_model_self_test_tokens_per_second, it)
+                    } ?: getString(R.string.local_model_self_test_tokens_per_second_unavailable)
                     listOf(
+                        getString(
+                            R.string.local_model_self_test_case_header,
+                            case.configuration.name,
+                            case.runNumber
+                        ),
                         getString(R.string.local_model_self_test_n_threads, case.nThreads),
-                        getString(R.string.local_model_self_test_prompt_tokens, case.promptTokenCount),
-                        getString(R.string.local_model_self_test_first_token_time, case.firstTokenTimeMs),
-                        getString(R.string.local_model_self_test_tokens_per_second, case.tokensPerSecond)
+                        getString(R.string.local_model_self_test_allowed_cores, allowedCores),
+                        promptTokensLine,
+                        firstTokenLine,
+                        tokenRateLine,
+                        getString(R.string.local_model_self_test_run_status, case.status.displayLabel)
                     )
                 }
                 metricsView.text = (caseLines + getString(

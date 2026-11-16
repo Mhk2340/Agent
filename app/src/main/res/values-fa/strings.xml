@@ -47,13 +47,26 @@
     <string name="local_model_self_test_succeeded">خودآزمایی مدل محلی موفق بود.</string>
     <string name="local_model_self_test_failed">خودآزمایی مدل محلی ناموفق بود.</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_case_header">پیکربندی %1$s — اجرای %2$d — PROVISIONAL - pending GEN-PERF-1 (n=1)</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
     <string name="local_model_self_test_n_threads">n_threads — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_prompt_tokens">تعداد توکن‌های prompt قالب‌بندی‌شده — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d</string>
+    <string name="local_model_self_test_allowed_cores">CPUهای مجاز (sched_getaffinity) — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$s</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_prompt_tokens">تعداد توکن‌های prompt — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_prompt_tokens_unavailable">تعداد توکن‌های prompt — PROVISIONAL - pending GEN-PERF-1 (n=1): اندازه‌گیری نشد</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
     <string name="local_model_self_test_first_token_time">زمان تا نخستین توکن — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d ms</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_first_token_time_unavailable">زمان تا نخستین توکن — PROVISIONAL - pending GEN-PERF-1 (n=1): اندازه‌گیری نشد</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
     <string name="local_model_self_test_tokens_per_second">توکن تولیدشده در ثانیه — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$.2f</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_tokens_per_second_unavailable">توکن تولیدشده در ثانیه — PROVISIONAL - pending GEN-PERF-1 (n=1): اندازه‌گیری نشد</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_run_status">وضعیت اجرا — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$s</string>
+    <string name="local_model_self_test_value_unavailable">در دسترس نیست</string>
     <string name="local_model_self_test_system_info">system_info کتابخانه: %1$s</string>
     <string name="model_import_picker_unavailable">انتخاب‌گر سند در این دستگاه در دسترس نیست.</string>
     <string name="model_import_auth_required">پیش از واردکردن مدل، قفل برنامه را باز کنید.</string>

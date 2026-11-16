@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <sched.h>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -365,6 +366,76 @@ jobject makeGenerationResult(
 }
 
 } // namespace
+
+// Uses pid zero, the Linux convention for operating on the calling thread. The runner applies
+// this before nativeLoadModel/nativeGenerate creates a context or ggml compute workers.
+extern "C" JNIEXPORT jintArray JNICALL
+Java_inference_JniLlamaBridge_nativeGetThreadAffinity(JNIEnv * env, jobject) {
+    cpu_set_t cpuSet;
+    CPU_ZERO(&cpuSet);
+    if (sched_getaffinity(0, sizeof(cpuSet), &cpuSet) != 0) {
+        return nullptr;
+    }
+
+    jint cpuIds[CPU_SETSIZE];
+    jsize count = 0;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (CPU_ISSET(cpu, &cpuSet)) {
+            cpuIds[count++] = static_cast<jint>(cpu);
+        }
+    }
+
+    jintArray result = env->NewIntArray(count);
+    if (result == nullptr) {
+        return nullptr;
+    }
+    if (count > 0) {
+        env->SetIntArrayRegion(result, 0, count, cpuIds);
+        if (env->ExceptionCheck()) {
+            env->DeleteLocalRef(result);
+            return nullptr;
+        }
+    }
+    return result;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_inference_JniLlamaBridge_nativeSetThreadAffinity(
+    JNIEnv * env,
+    jobject,
+    jintArray requestedCpuIds
+) {
+    if (requestedCpuIds == nullptr) {
+        return JNI_FALSE;
+    }
+    const jsize count = env->GetArrayLength(requestedCpuIds);
+    if (count <= 0) {
+        return JNI_FALSE;
+    }
+
+    jint * cpuIds = env->GetIntArrayElements(requestedCpuIds, nullptr);
+    if (cpuIds == nullptr) {
+        return JNI_FALSE;
+    }
+
+    cpu_set_t cpuSet;
+    CPU_ZERO(&cpuSet);
+    bool valid = true;
+    for (jsize index = 0; index < count; ++index) {
+        const jint cpu = cpuIds[index];
+        if (cpu < 0 || cpu >= CPU_SETSIZE) {
+            valid = false;
+            break;
+        }
+        CPU_SET(cpu, &cpuSet);
+    }
+    env->ReleaseIntArrayElements(requestedCpuIds, cpuIds, JNI_ABORT);
+    if (!valid) {
+        return JNI_FALSE;
+    }
+
+    return sched_setaffinity(0, sizeof(cpuSet), &cpuSet) == 0 ? JNI_TRUE : JNI_FALSE;
+}
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_inference_JniLlamaBridge_nativeLoadModel(

@@ -51,6 +51,12 @@ internal interface LlamaNativeBridge {
 
     /** Requests llama.cpp's CPU abort callback without waiting for the inference lock. */
     fun cancelGeneration(handle: Long) = Unit
+
+    /** Returns the calling Linux thread's effective scheduler affinity, or null when unavailable. */
+    fun currentThreadAffinity(): IntArray? = null
+
+    /** Applies affinity to the calling Linux thread; the caller must read it back separately. */
+    fun setThreadAffinity(cpuIds: IntArray): Boolean = false
 }
 
 /** JNI declarations are resolved only when the app actually requests local inference. */
@@ -99,6 +105,16 @@ internal object JniLlamaBridge : LlamaNativeBridge {
         nativeCancelGeneration(handle)
     }
 
+    override fun currentThreadAffinity(): IntArray? {
+        requireLibrary()
+        return nativeGetThreadAffinity()
+    }
+
+    override fun setThreadAffinity(cpuIds: IntArray): Boolean {
+        requireLibrary()
+        return nativeSetThreadAffinity(cpuIds)
+    }
+
     private fun requireLibrary() {
         libraryLoadFailure?.let { error ->
             throw IllegalStateException("The local CPU runtime is unavailable", error)
@@ -123,6 +139,8 @@ internal object JniLlamaBridge : LlamaNativeBridge {
     ): NativeGenerationResult
     private external fun nativeReleaseModel(handle: Long)
     private external fun nativeCancelGeneration(handle: Long)
+    private external fun nativeGetThreadAffinity(): IntArray?
+    private external fun nativeSetThreadAffinity(cpuIds: IntArray): Boolean
 }
 
 /**
@@ -250,6 +268,14 @@ class LlamaCppInferenceBackend internal constructor(
     }
 
     internal fun systemInfo(): String = bridge.systemInfo()
+
+    internal fun currentThreadAffinity(): List<Int>? = runCatching {
+        bridge.currentThreadAffinity()?.toList()
+    }.getOrNull()
+
+    internal fun setThreadAffinity(cpuIds: List<Int>): Boolean = runCatching {
+        bridge.setThreadAffinity(cpuIds.toIntArray())
+    }.getOrDefault(false)
 
     /** Can be called without waiting for the generation lock; the CPU context checks this at decode boundaries. */
     fun requestAbortGeneration() {
