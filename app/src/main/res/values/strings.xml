@@ -50,8 +50,13 @@
     <string name="local_model_self_test_case_header">%1$s — run %2$d — PROVISIONAL - pending GEN-PERF-1 (n=1)</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
     <string name="local_model_self_test_n_threads">n_threads — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d</string>
+    <string name="local_model_self_test_order">Sweep order: fixed counterbalanced crossover A–B–D / B–D–A / D–A–B</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_allowed_cores">Allowed CPUs (sched_getaffinity) — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$s</string>
+    <string name="local_model_self_test_affinity_before">Affinity before run (saved mask) — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$s</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_allowed_cores">Allowed CPUs during generation (sched_getaffinity readback) — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$s</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_affinity_after">Affinity after run (verified) — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$s</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
     <string name="local_model_self_test_prompt_tokens">Prompt token count — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
@@ -61,9 +66,13 @@
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
     <string name="local_model_self_test_first_token_time_unavailable">Time to first token — PROVISIONAL - pending GEN-PERF-1 (n=1): not measured</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_tokens_per_second">Generated tokens per second — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$.2f</string>
+    <string name="local_model_self_test_prefill_tokens_per_second">Prompt prefill tok/s (prompt evaluation only; tokenization excluded) — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$.2f</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_tokens_per_second_unavailable">Generated tokens per second — PROVISIONAL - pending GEN-PERF-1 (n=1): not measured</string>
+    <string name="local_model_self_test_prefill_tokens_per_second_unavailable">Prompt prefill tok/s — PROVISIONAL - pending GEN-PERF-1 (n=1): not measured</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_tokens_per_second">Decode tok/s (tokens after the first) — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$.2f</string>
+    <!-- // PROVISIONAL - pending GEN-PERF-1 -->
+    <string name="local_model_self_test_tokens_per_second_unavailable">Decode tok/s (tokens after the first) — PROVISIONAL - pending GEN-PERF-1 (n=1): not measurable</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
     <string name="local_model_self_test_run_status">Run status — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$s</string>
     <string name="local_model_self_test_value_unavailable">not available</string>

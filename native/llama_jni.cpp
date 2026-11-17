@@ -323,8 +323,9 @@ jobject makeGenerationResult(
     jint promptTokens,
     jint completionTokens,
     const std::string & finishReason,
+    jlong prefillElapsedNanos,
     jlong firstTokenElapsedNanos,
-    jlong generationElapsedNanos
+    jlong decodeElapsedNanos
 ) {
     jclass resultClass = env->FindClass("inference/NativeGenerationResult");
     if (resultClass == nullptr) {
@@ -333,7 +334,7 @@ jobject makeGenerationResult(
     const jmethodID constructor = env->GetMethodID(
         resultClass,
         "<init>",
-        "(Ljava/lang/String;IILjava/lang/String;JJ)V"
+        "(Ljava/lang/String;IILjava/lang/String;JJJ)V"
     );
     if (constructor == nullptr) {
         env->DeleteLocalRef(resultClass);
@@ -356,8 +357,9 @@ jobject makeGenerationResult(
         promptTokens,
         completionTokens,
         javaFinishReason,
+        prefillElapsedNanos,
         firstTokenElapsedNanos,
-        generationElapsedNanos
+        decodeElapsedNanos
     );
     env->DeleteLocalRef(javaText);
     env->DeleteLocalRef(javaFinishReason);
@@ -553,6 +555,8 @@ Java_inference_JniLlamaBridge_nativeGenerate(
         }
 
         llama_memory_clear(llama_get_memory(session->context), true);
+        // Measure prompt evaluation separately; prompt formatting and tokenization are excluded.
+        const auto prefillStarted = std::chrono::steady_clock::now();
         // Pinned b11669 llama_batch_compat supplies the missing sequence, position, and output metadata.
         // PROVISIONAL - pending GEN-PERF-1
         for (size_t promptOffset = 0; promptOffset < promptTokens.size();) {
@@ -567,6 +571,9 @@ Java_inference_JniLlamaBridge_nativeGenerate(
             checkDecodeStatus(llama_decode(session->context, promptBatch));
             promptOffset += batchTokenCount;
         }
+        const jlong prefillElapsedNanos = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - prefillStarted
+        ).count();
 
         llama_sampler_chain_params samplerParams = llama_sampler_chain_default_params();
         samplerParams.no_perf = true;
@@ -614,28 +621,32 @@ Java_inference_JniLlamaBridge_nativeGenerate(
         std::vector<llama_token> outputTokens;
         std::string finishReason = "max_tokens";
         jlong firstTokenElapsedNanos{};
+        jlong decodeElapsedNanos{};
         bool firstTokenRecorded = false;
         for (jint produced = 0; produced < maxTokens; ++produced) {
             const llama_token token = llama_sampler_sample(sampler.get(), session->context, kLastLogitsIndex);
+            const jlong tokenElapsedNanos = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - generationStarted
+            ).count();
             if (llama_vocab_is_eog(vocab, token)) {
                 finishReason = "stop";
                 break;
             }
             if (!firstTokenRecorded) {
-                firstTokenElapsedNanos = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - generationStarted
-                ).count();
+                firstTokenElapsedNanos = tokenElapsedNanos;
                 firstTokenRecorded = true;
+            } else {
+                decodeElapsedNanos = tokenElapsedNanos - firstTokenElapsedNanos;
             }
             outputTokens.push_back(token);
-            const llama_batch nextBatch = llama_batch_get_one(&outputTokens.back(), kSingleTokenBatchSize);
-            checkDecodeStatus(llama_decode(session->context, nextBatch));
+            // PROVISIONAL - pending GEN-PERF-1
+            if (produced + 1 < maxTokens) {
+                const llama_batch nextBatch = llama_batch_get_one(&outputTokens.back(), kSingleTokenBatchSize);
+                checkDecodeStatus(llama_decode(session->context, nextBatch));
+            }
         }
 
         const std::string outputText = detokenize(vocab, outputTokens);
-        const jlong generationElapsedNanos = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - generationStarted
-        ).count();
         if (promptTokens.size() > static_cast<size_t>(std::numeric_limits<jint>::max()) ||
             outputTokens.size() > static_cast<size_t>(std::numeric_limits<jint>::max())) {
             throw std::runtime_error("Token usage count exceeds the Kotlin contract range");
@@ -646,8 +657,9 @@ Java_inference_JniLlamaBridge_nativeGenerate(
             static_cast<jint>(promptTokens.size()),
             static_cast<jint>(outputTokens.size()),
             finishReason,
+            prefillElapsedNanos,
             firstTokenElapsedNanos,
-            generationElapsedNanos
+            decodeElapsedNanos
         );
     } catch (const std::bad_alloc &) {
         throwJava(env, "java/lang/OutOfMemoryError", "The CPU inference context could not process this request");

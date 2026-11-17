@@ -62,7 +62,7 @@ class MainActivity : Activity() {
         // PROVISIONAL - pending GEN-PERF-1
         const val MODEL_IMPORT_REQUEST_CODE = 0x4d49
         // PROVISIONAL - pending GEN-PERF-1
-        const val LOCAL_MODEL_SELF_TEST_TIMEOUT_MS = 900_000L
+        const val LOCAL_MODEL_SELF_TEST_TIMEOUT_MS = 1_200_000L
         // PROVISIONAL - pending GEN-PERF-1
         const val LOCAL_MODEL_SELF_TEST_ELIGIBILITY_POLL_MS = 250L
     }
@@ -555,44 +555,74 @@ class MainActivity : Activity() {
                 metricsView.visibility = View.GONE
                 metricsView.text = ""
             }
-            is LocalModelSelfTestOutcome.Success -> {
-                val metrics = result.metrics
-                status.setText(R.string.local_model_self_test_succeeded)
-                status.visibility = View.VISIBLE
-                val unavailable = getString(R.string.local_model_self_test_value_unavailable)
-                val caseLines = metrics.cases.flatMap { case ->
-                    val allowedCores = case.allowedCoreIds?.joinToString(prefix = "[", postfix = "]")
-                        ?: unavailable
-                    val promptTokensLine = case.promptTokenCount?.let {
-                        getString(R.string.local_model_self_test_prompt_tokens, it)
-                    } ?: getString(R.string.local_model_self_test_prompt_tokens_unavailable)
-                    val firstTokenLine = case.firstTokenTimeMs?.let {
-                        getString(R.string.local_model_self_test_first_token_time, it)
-                    } ?: getString(R.string.local_model_self_test_first_token_time_unavailable)
-                    val tokenRateLine = case.tokensPerSecond?.let {
-                        getString(R.string.local_model_self_test_tokens_per_second, it)
-                    } ?: getString(R.string.local_model_self_test_tokens_per_second_unavailable)
-                    listOf(
-                        getString(
-                            R.string.local_model_self_test_case_header,
-                            case.configuration.name,
-                            case.runNumber
-                        ),
-                        getString(R.string.local_model_self_test_n_threads, case.nThreads),
-                        getString(R.string.local_model_self_test_allowed_cores, allowedCores),
-                        promptTokensLine,
-                        firstTokenLine,
-                        tokenRateLine,
-                        getString(R.string.local_model_self_test_run_status, case.status.displayLabel)
-                    )
-                }
-                metricsView.text = (caseLines + getString(
-                    R.string.local_model_self_test_system_info,
-                    metrics.systemInfo
-                )).joinToString("\n")
-                metricsView.visibility = View.VISIBLE
-            }
+            is LocalModelSelfTestOutcome.Success -> renderLocalModelSelfTestMetrics(
+                status,
+                metricsView,
+                result.metrics,
+                succeeded = true
+            )
+            is LocalModelSelfTestOutcome.PartialFailure -> renderLocalModelSelfTestMetrics(
+                status,
+                metricsView,
+                result.metrics,
+                succeeded = false
+            )
         }
+    }
+
+    private fun renderLocalModelSelfTestMetrics(
+        status: TextView,
+        metricsView: TextView,
+        metrics: inference.LocalModelSelfTestMetrics,
+        succeeded: Boolean
+    ) {
+        status.setText(
+            if (succeeded) R.string.local_model_self_test_succeeded
+            else R.string.local_model_self_test_failed
+        )
+        status.visibility = View.VISIBLE
+        val unavailable = getString(R.string.local_model_self_test_value_unavailable)
+        val caseLines = metrics.cases.flatMap { case ->
+            val affinityBefore = case.affinityBeforeCoreIds?.joinToString(prefix = "[", postfix = "]")
+                ?: unavailable
+            val allowedCores = case.allowedCoreIds?.joinToString(prefix = "[", postfix = "]")
+                ?: unavailable
+            val affinityAfter = case.affinityAfterCoreIds?.joinToString(prefix = "[", postfix = "]")
+                ?: unavailable
+            val promptTokensLine = case.promptTokenCount?.let {
+                getString(R.string.local_model_self_test_prompt_tokens, it)
+            } ?: getString(R.string.local_model_self_test_prompt_tokens_unavailable)
+            val firstTokenLine = case.firstTokenTimeMs?.let {
+                getString(R.string.local_model_self_test_first_token_time, it)
+            } ?: getString(R.string.local_model_self_test_first_token_time_unavailable)
+            val prefillRateLine = case.prefillTokensPerSecond?.let {
+                getString(R.string.local_model_self_test_prefill_tokens_per_second, it)
+            } ?: getString(R.string.local_model_self_test_prefill_tokens_per_second_unavailable)
+            val decodeRateLine = case.decodeTokensPerSecond?.let {
+                getString(R.string.local_model_self_test_tokens_per_second, it)
+            } ?: getString(R.string.local_model_self_test_tokens_per_second_unavailable)
+            listOf(
+                getString(
+                    R.string.local_model_self_test_case_header,
+                    case.configuration.displayName,
+                    case.runNumber
+                ),
+                getString(R.string.local_model_self_test_n_threads, case.nThreads),
+                getString(R.string.local_model_self_test_affinity_before, affinityBefore),
+                getString(R.string.local_model_self_test_allowed_cores, allowedCores),
+                getString(R.string.local_model_self_test_affinity_after, affinityAfter),
+                promptTokensLine,
+                firstTokenLine,
+                prefillRateLine,
+                decodeRateLine,
+                getString(R.string.local_model_self_test_run_status, case.status.displayLabel)
+            )
+        }
+        metricsView.text = (listOf(getString(R.string.local_model_self_test_order)) + caseLines + getString(
+            R.string.local_model_self_test_system_info,
+            metrics.systemInfo
+        )).joinToString("\n")
+        metricsView.visibility = View.VISIBLE
     }
 
     private fun attachCredentialSave(screen: View, inputId: Int, buttonId: Int, providerName: String) {

@@ -18,14 +18,16 @@ internal data class NativeGenerationResult(
     val promptTokens: Int,
     val completionTokens: Int,
     val finishReason: String,
+    val prefillElapsedNanos: Long,
     val firstTokenElapsedNanos: Long,
-    val generationElapsedNanos: Long
+    val decodeElapsedNanos: Long
 )
 
 internal data class LlamaRuntimeMeasurements(
     val modelLoadTimeMs: Long,
     val firstTokenTimeMs: Long,
-    val tokensPerSecond: Double,
+    val prefillTokensPerSecond: Double?,
+    val decodeTokensPerSecond: Double?,
     val tokenCount: Int
 )
 
@@ -152,12 +154,16 @@ class LlamaCppInferenceBackend internal constructor(
     private val contextTokens: Int,
     private val bridge: LlamaNativeBridge = JniLlamaBridge,
     private val monotonicNanos: () -> Long = System::nanoTime,
-    private val nThreads: Int = Runtime.getRuntime().availableProcessors(),
-    private val nThreadsBatch: Int = nThreads
+    nThreads: Int = Runtime.getRuntime().availableProcessors(),
+    nThreadsBatch: Int = nThreads
 ) : Closeable {
     private val lock = ReentrantLock()
     private val nativeHandleLock = Any()
     private var loadedModelPath: String? = null
+    @Volatile
+    private var configuredNThreads: Int = nThreads
+    @Volatile
+    private var configuredNThreadsBatch: Int = nThreadsBatch
     @Volatile
     private var nativeHandle: Long = INVALID_NATIVE_HANDLE
 
@@ -229,16 +235,31 @@ class LlamaCppInferenceBackend internal constructor(
             if (!isStillAllowedSafely(isStillAllowed)) {
                 return failure(InferenceError.Unavailable("Local self-test was stopped"))
             }
-            if (nativeResult.firstTokenElapsedNanos < 0L ||
-                nativeResult.generationElapsedNanos < nativeResult.firstTokenElapsedNanos
+            if (nativeResult.promptTokens < 0 || nativeResult.completionTokens < 0 ||
+                nativeResult.prefillElapsedNanos < 0L ||
+                nativeResult.firstTokenElapsedNanos < 0L ||
+                nativeResult.decodeElapsedNanos < 0L
             ) {
                 return failure(InferenceError.Unavailable("Native timing data was unavailable"))
             }
-            val decodeNanos = nativeResult.generationElapsedNanos - nativeResult.firstTokenElapsedNanos
-            val tokenRate = if (nativeResult.completionTokens > 0 && decodeNanos > 0L) {
-                nativeResult.completionTokens.toDouble() * NANOSECONDS_PER_SECOND / decodeNanos.toDouble()
+            val prefillRate = if (nativeResult.promptTokens > 0 && nativeResult.prefillElapsedNanos > 0L) {
+                nativeResult.promptTokens.toDouble() * NANOSECONDS_PER_SECOND /
+                    nativeResult.prefillElapsedNanos.toDouble()
             } else {
-                0.0
+                null
+            }
+            // PROVISIONAL - pending GEN-PERF-1
+            val decodeTokensAfterFirst = (nativeResult.completionTokens - 1).coerceAtLeast(0)
+            val decodeRate = if (decodeTokensAfterFirst > 0 && nativeResult.decodeElapsedNanos > 0L) {
+                decodeTokensAfterFirst.toDouble() * NANOSECONDS_PER_SECOND /
+                    nativeResult.decodeElapsedNanos.toDouble()
+            } else {
+                null
+            }
+            if ((prefillRate != null && !prefillRate.isFinite()) ||
+                (decodeRate != null && !decodeRate.isFinite())
+            ) {
+                return failure(InferenceError.Unavailable("Native timing data was unavailable"))
             }
             Result.success(
                 MeasuredLlamaInference(
@@ -253,7 +274,8 @@ class LlamaCppInferenceBackend internal constructor(
                     measurements = LlamaRuntimeMeasurements(
                         modelLoadTimeMs = TimeUnit.NANOSECONDS.toMillis(modelLoadNanos.coerceAtLeast(0L)),
                         firstTokenTimeMs = TimeUnit.NANOSECONDS.toMillis(nativeResult.firstTokenElapsedNanos),
-                        tokensPerSecond = tokenRate,
+                        prefillTokensPerSecond = prefillRate,
+                        decodeTokensPerSecond = decodeRate,
                         tokenCount = nativeResult.completionTokens
                     )
                 )
@@ -264,6 +286,18 @@ class LlamaCppInferenceBackend internal constructor(
             failure(InferenceError.Unavailable("The source-built CPU inference library could not be loaded"))
         } catch (_: Exception) {
             failure(InferenceError.Unavailable("Native CPU inference failed"))
+        }
+    }
+
+    /** Configures the context before it is created; a live context is discarded on thread-count change. */
+    internal fun configureThreadCounts(nThreads: Int, nThreadsBatch: Int) {
+        require(nThreads > 0 && nThreadsBatch > 0)
+        lock.withLock {
+            if (configuredNThreads != nThreads || configuredNThreadsBatch != nThreadsBatch) {
+                releaseLoadedModel()
+                configuredNThreads = nThreads
+                configuredNThreadsBatch = nThreadsBatch
+            }
         }
     }
 
@@ -286,13 +320,15 @@ class LlamaCppInferenceBackend internal constructor(
     }
 
     override fun close() {
-        lock.withLock {
-            synchronized(nativeHandleLock) {
-                if (nativeHandle != INVALID_NATIVE_HANDLE) {
-                    runCatching { bridge.releaseModel(nativeHandle) }
-                    nativeHandle = INVALID_NATIVE_HANDLE
-                    loadedModelPath = null
-                }
+        lock.withLock { releaseLoadedModel() }
+    }
+
+    private fun releaseLoadedModel() {
+        synchronized(nativeHandleLock) {
+            if (nativeHandle != INVALID_NATIVE_HANDLE) {
+                runCatching { bridge.releaseModel(nativeHandle) }
+                nativeHandle = INVALID_NATIVE_HANDLE
+                loadedModelPath = null
             }
         }
     }
@@ -310,7 +346,12 @@ class LlamaCppInferenceBackend internal constructor(
         }
         if (nativeHandle == INVALID_NATIVE_HANDLE) {
             val start = monotonicNanos()
-            val loadedHandle = bridge.loadModel(path, contextTokens, nThreads, nThreadsBatch)
+            val loadedHandle = bridge.loadModel(
+                path,
+                contextTokens,
+                configuredNThreads,
+                configuredNThreadsBatch
+            )
             val loadDuration = (monotonicNanos() - start).coerceAtLeast(0L)
             check(loadedHandle != INVALID_NATIVE_HANDLE) { "llama.cpp returned an invalid model handle" }
             synchronized(nativeHandleLock) {

@@ -18,6 +18,7 @@ import inference.HardwareBenchmarkWorkerDependencies
 import inference.HardwareDelegateSelector
 import inference.InferenceDelegateExecutor
 import inference.InferenceDelegateOutput
+import inference.DedicatedCpuInferenceDispatcher
 import inference.LlamaCppInferenceBackend
 import inference.LocalInferenceEngine
 import inference.LocalModelSelfTestCancellation
@@ -48,6 +49,7 @@ import persistence.DatabaseInitializationResult
 import reliability.AgentOperatingModeManager
 import reliability.OperatingMode
 import runtime.AppInitializer
+import runtime.AgentLogger
 import security.AndroidAgentPolicyConfigResetHook
 import security.AndroidAgentPolicyConfigStore
 import security.AndroidAppLockStateStore
@@ -157,8 +159,11 @@ class AgentContainer(
 
     private val localInferenceBudgetPolicy: ContextWindowBudgetPolicy by lazy { ContextWindowBudgetPolicy() }
 
-    private val localLlamaInferenceBackend: LlamaCppInferenceBackend by lazy {
-        LlamaCppInferenceBackend(localModelAssetStore, localInferenceBudgetPolicy.maxContextTokens)
+    private val localCpuInferenceDispatcher: DedicatedCpuInferenceDispatcher by lazy {
+        DedicatedCpuInferenceDispatcher(
+            backend = LlamaCppInferenceBackend(localModelAssetStore, localInferenceBudgetPolicy.maxContextTokens),
+            reportGenericFallback = { message -> AgentLogger.w("LocalInference", message) }
+        )
     }
 
     /** Production inference is bound to the source-built CPU-only JNI backend; GPU delegates are rejected. */
@@ -175,7 +180,8 @@ class AgentContainer(
                 if (delegate != HardwareDelegate.CPU) {
                     Result.failure(IllegalStateException("GPU execution is disabled for the Phase H runtime"))
                 } else {
-                    localLlamaInferenceBackend.generate(request).map { InferenceDelegateOutput(it) }
+                    localCpuInferenceDispatcher.generate(request, ::isLocalInferenceAllowed)
+                        .map { InferenceDelegateOutput(it) }
                 }
             },
             modeDelegateOverride = { HardwareDelegate.CPU },
@@ -187,6 +193,15 @@ class AgentContainer(
             supportsSeed = false,
             supportsCancellation = false
         )
+    }
+
+    private fun isLocalInferenceAllowed(): Boolean = runCatching {
+        appLockManager.isAppUnlocked() && lockdownCondition() == LockdownCondition.NONE
+    }.getOrDefault(false)
+
+    /** Unloads the verified CPU model on its dedicated worker after aborting any active generation. */
+    internal fun unloadLocalInferenceModel() {
+        runCatching { localCpuInferenceDispatcher.unloadModel() }
     }
 
     /** Creates a disposable, diagnostics-free backend while preserving the normal InferenceEngine route. */
