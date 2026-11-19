@@ -138,6 +138,23 @@
         android:layout_marginTop="4dp"
         android:text="@string/model_import_button" />
 
+    <LinearLayout
+        android:id="@+id/local_model_developer_tools_section"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:background="@drawable/security_card_background"
+        android:orientation="vertical"
+        android:padding="8dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/local_model_developer_tools_title"
+            android:textColor="@color/agent_text"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
     <Button
         android:id="@+id/settings_local_model_self_test_button"
         android:layout_width="match_parent"
@@ -198,6 +215,7 @@
         android:layout_height="wrap_content"
         android:textColor="@color/agent_secondary_text"
         android:visibility="gone" />
+    </LinearLayout>
 
     <TextView
         android:layout_width="match_parent"

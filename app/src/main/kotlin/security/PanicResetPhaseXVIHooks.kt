@@ -13,6 +13,9 @@ import contracts.InferenceProvider
 interface PanicResetPhaseXVIHooks {
     fun cancelActiveJobs(): Int
     fun purgeActiveSharedWorkspace(): Boolean
+
+    /** Added for private on-device chat data; test-only legacy implementations may keep the no-op. */
+    fun purgeLocalChatHistory(): Boolean = true
 }
 
 /**

@@ -264,6 +264,17 @@ class MainActivity : Activity() {
         } else {
             conditionView.visibility = View.GONE
         }
+        screen.findViewById<View>(R.id.open_local_chat_button).setOnClickListener {
+            val container = (application as AgentApplication).agentContainer
+            val allowed = runCatching {
+                container.appLockManager.isAppUnlocked() && container.lockdownCondition() == LockdownCondition.NONE
+            }.getOrDefault(false)
+            if (allowed) {
+                startActivity(Intent(this, LocalChatActivity::class.java))
+            } else {
+                Toast.makeText(this, R.string.local_chat_error_locked, Toast.LENGTH_LONG).show()
+            }
+        }
         screen.findViewById<View>(R.id.settings_button).setOnClickListener {
             dispatch { it.openSettings() }
         }
@@ -289,6 +300,8 @@ class MainActivity : Activity() {
             else -> R.string.model_import_status_missing
         }
         screen.findViewById<TextView>(R.id.model_import_status).setText(modelStatus)
+        screen.findViewById<View>(R.id.local_model_developer_tools_section).visibility =
+            if (BuildConfig.DEBUG) View.VISIBLE else View.GONE
         screen.findViewById<View>(R.id.settings_model_import_button).apply {
             isEnabled = !modelImportInFlight.get() && !localModelSelfTestInFlight.get()
             setOnClickListener { openModelDocumentPicker() }

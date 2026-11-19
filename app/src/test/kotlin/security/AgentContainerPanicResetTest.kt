@@ -1,6 +1,10 @@
 package security
 
 import android.content.Context
+import chat.LocalChatArchive
+import chat.LocalChatConversation
+import chat.LocalChatMessage
+import chat.LocalChatRole
 import androidx.test.core.app.ApplicationProvider
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
@@ -43,6 +47,7 @@ import skills.SkillExecutionRequest
 import testutil.RoomTestEnvironment
 import testutil.TestOnlyIntegrityMacKeyProvider
 import testutil.TestOnlyKeystoreKeyProvider
+import java.io.File
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
@@ -168,6 +173,24 @@ class AgentContainerPanicResetTest {
         )
         container.memoryManager.appendSessionMessage("user", "old session", memory.MemoryCallerRole.SYSTEM_CORE)
         container.secretManager.storeSecret("gemini", "synthetic-provider-secret")
+        val chatFile = File(context.noBackupFilesDir, "local-chat-history.enc")
+        val chatConversation = LocalChatConversation(
+            id = "chat-before-reset",
+            title = "private chat",
+            createdAtEpochMs = 1L,
+            updatedAtEpochMs = 2L,
+            messages = listOf(
+                LocalChatMessage("chat-user", LocalChatRole.USER, "private question", 1L),
+                LocalChatMessage("chat-answer", LocalChatRole.ASSISTANT, "private answer", 2L)
+            )
+        )
+        assertTrue(container.localChatHistoryStore.write(
+            LocalChatArchive(
+                activeConversationId = chatConversation.id,
+                conversations = listOf(chatConversation)
+            )
+        ).isSuccess)
+        assertTrue(chatFile.exists())
         val oldDatabaseKey = keyProvider.getSecretKey(AesGcmCipher.DEFAULT_DATABASE_KEY_ALIAS)
         assertNotNull(oldDatabaseKey)
         assertEquals(listOf("gemini"), container.secretManager.listSecretAliases())
@@ -208,6 +231,7 @@ class AgentContainerPanicResetTest {
         )
 
         assertTrue(container.secretManager.listSecretAliases().isEmpty())
+        assertFalse(chatFile.exists())
         assertTrue(database.providerSecretDao().getProviderIds().isEmpty())
         assertTrue(keyProvider.aliases().none { it.startsWith("android_agent_provider_api_key_") })
         assertEquals(0, container.memoryManager.getTotalCount(memory.MemoryCallerRole.SYSTEM_CORE))

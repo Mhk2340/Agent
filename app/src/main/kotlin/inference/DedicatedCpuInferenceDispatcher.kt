@@ -90,6 +90,178 @@ internal class DedicatedCpuInferenceDispatcher(
         }
     }
 
+    /** Runs exact-template token counting on the same affinity-controlled worker as generation. */
+    internal fun countConversationTokens(
+        systemPrompt: String,
+        messages: List<NativeChatMessage>,
+        isStillAllowed: () -> Boolean = { true }
+    ): Result<Int> = submitChatOperation(isStillAllowed) {
+        backend.formattedConversationTokenCount(systemPrompt, messages, isStillAllowed)
+    }
+
+    /** Role-preserving local chat generation; JNI supplies cumulative text snapshots while decoding. */
+    internal fun generateConversation(
+        systemPrompt: String,
+        messages: List<NativeChatMessage>,
+        maxTokens: Int,
+        temperature: Float,
+        topP: Float,
+        isStillAllowed: () -> Boolean = { true },
+        onPromptTokenCount: (Int) -> Unit = {},
+        onTextSnapshot: (String) -> Unit
+    ): Result<MeasuredLlamaInference> = submitChatOperation(isStillAllowed) {
+        backend.generateConversationMeasured(
+            systemPrompt = systemPrompt,
+            messages = messages,
+            maxTokens = maxTokens,
+            temperature = temperature,
+            topP = topP,
+            isStillAllowed = isStillAllowed,
+            onPromptTokenCount = onPromptTokenCount,
+            onTextSnapshot = onTextSnapshot
+        )
+    }
+
+    /** Immediate native abort request; the eligibility watcher then interrupts/unloads the session. */
+    internal fun requestAbortGeneration() {
+        backend.requestAbortGeneration()
+    }
+
+    private fun <T> submitChatOperation(
+        isStillAllowed: () -> Boolean,
+        operation: () -> Result<T>
+    ): Result<T> {
+        if (closed.get()) return chatFailure()
+        if (Thread.currentThread() === workerThread.get()) {
+            return runChatOperationOnInferenceThread(isStillAllowed, operation)
+        }
+
+        val future = try {
+            executor.submit<Result<T>> {
+                runChatOperationOnInferenceThread(isStillAllowed, operation)
+            }
+        } catch (_: RejectedExecutionException) {
+            return chatFailure()
+        }
+        val watcher = try {
+            eligibilityWatcher.scheduleWithFixedDelay(
+                {
+                    if (closed.get() || !isAllowedSafely(isStillAllowed)) {
+                        backend.requestAbortGeneration()
+                        future.cancel(true)
+                    }
+                },
+                ELIGIBILITY_POLL_MILLIS,
+                ELIGIBILITY_POLL_MILLIS,
+                TimeUnit.MILLISECONDS
+            )
+        } catch (_: RejectedExecutionException) {
+            future.cancel(true)
+            backend.requestAbortGeneration()
+            return chatFailure()
+        }
+
+        return try {
+            future.get()
+        } catch (_: InterruptedException) {
+            future.cancel(true)
+            backend.requestAbortGeneration()
+            Thread.currentThread().interrupt()
+            chatFailure()
+        } catch (_: ExecutionException) {
+            chatFailure()
+        } catch (_: CancellationException) {
+            chatFailure()
+        } finally {
+            watcher.cancel(false)
+        }
+    }
+
+    private fun <T> runChatOperationOnInferenceThread(
+        isStillAllowed: () -> Boolean,
+        operation: () -> Result<T>
+    ): Result<T> {
+        val currentMask = readMask()
+        val originalMask = lastOriginalMask ?: currentMask
+        if (lastOriginalMask != null && currentMask != lastOriginalMask && !restoreMask(lastOriginalMask!!)) {
+            reportRestoreFailureSafely()
+            return chatFailure()
+        }
+        val strongCoreIds = runCatching(strongCoreIdsProvider)
+            .getOrNull()
+            ?.distinct()
+            ?.sorted()
+            ?.takeIf { it.isNotEmpty() }
+
+        var result: Result<T> = chatFailure()
+        var affinityRestored = true
+        try {
+            if (isAllowedSafely(isStillAllowed) && !closed.get()) {
+                val targetCores = strongCoreIds?.takeIf { originalMask != null }
+                val pinnedProfile = targetCores?.let { BackendProfile(it.size, it) }
+                if (pinnedProfile != null) {
+                    ensureBackendProfile(pinnedProfile)
+                    val setSucceeded = backend.setThreadAffinity(targetCores)
+                    val effectiveMask = readMask()
+                    if (setSucceeded && effectiveMask == targetCores) {
+                        result = operation()
+                        if (!isAllowedSafely(isStillAllowed)) result = chatFailure()
+                    } else {
+                        reportFallbackSafely()
+                        if (originalMask == null || !restoreMask(originalMask)) {
+                            reportRestoreFailureSafely()
+                        } else {
+                            result = runChatFallback(originalMask, isStillAllowed, operation)
+                        }
+                    }
+                } else {
+                    reportFallbackSafely()
+                    result = runChatFallback(originalMask, isStillAllowed, operation)
+                }
+            }
+        } catch (_: Throwable) {
+            result = chatFailure()
+        } finally {
+            if (originalMask != null) {
+                affinityRestored = readMask() == originalMask || restoreMask(originalMask)
+                lastOriginalMask = originalMask
+            }
+            val abortOrUnloadRequested = closed.get() ||
+                Thread.currentThread().isInterrupted ||
+                !isAllowedSafely(isStillAllowed)
+            if (abortOrUnloadRequested) {
+                runCatching { backend.close() }
+                activeBackendProfile = null
+            }
+        }
+
+        if (!affinityRestored) {
+            reportRestoreFailureSafely()
+            return chatFailure()
+        }
+        return result
+    }
+
+    private fun <T> runChatFallback(
+        originalMask: List<Int>?,
+        isStillAllowed: () -> Boolean,
+        operation: () -> Result<T>
+    ): Result<T> {
+        ensureBackendProfile(BackendProfile(FALLBACK_N_THREADS, originalMask))
+        val actualFallbackMask = readMask()
+        if (originalMask != null && actualFallbackMask != originalMask && !restoreMask(originalMask)) {
+            reportRestoreFailureSafely()
+            return chatFailure()
+        }
+        if (!isAllowedSafely(isStillAllowed) || closed.get()) return chatFailure()
+        val generated = operation()
+        return if (isAllowedSafely(isStillAllowed)) generated else chatFailure()
+    }
+
+    private fun <T> chatFailure(): Result<T> = Result.failure(
+        AgentModelException(InferenceError.Unavailable(GENERIC_FAILURE_MESSAGE))
+    )
+
     /** Unloads on the same worker, after any active request has aborted and reset its affinity. */
     fun unloadModel() {
         if (closed.get()) return

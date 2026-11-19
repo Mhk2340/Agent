@@ -1,6 +1,10 @@
 package runtime.di
 
 import android.content.Context
+import chat.DispatcherLocalChatInference
+import chat.EncryptedLocalChatHistoryStore
+import chat.LocalChatController
+import chat.LocalChatPayloadCipher
 import inference.AndroidContinuousDeviceIdleGate
 import inference.AndroidDeviceConditionSnapshotProvider
 import inference.AndroidDeviceFingerprintProvider
@@ -166,6 +170,39 @@ class AgentContainer(
         )
     }
 
+    private val localChatHistoryStoreLazy = lazy {
+        val context = checkNotNull(applicationContext) {
+            "AgentContainer needs Context for private local chat history"
+        }
+        val payloadCipher = AesGcmCipher(keyProvider = keystoreKeyProvider)
+        EncryptedLocalChatHistoryStore(
+            historyFile = java.io.File(context.noBackupFilesDir, "local-chat-history.enc"),
+            cipher = object : LocalChatPayloadCipher {
+                override fun encrypt(plainText: ByteArray): ByteArray = payloadCipher.encryptBytes(plainText)
+                override fun decrypt(cipherText: ByteArray): ByteArray = payloadCipher.decryptBytes(cipherText)
+            },
+            isAccessAllowed = ::isLocalInferenceAllowed
+        )
+    }
+    internal val localChatHistoryStore get() = localChatHistoryStoreLazy.value
+
+    private val localChatControllerLazy = lazy {
+        LocalChatController(
+            historyStore = localChatHistoryStore,
+            inference = DispatcherLocalChatInference(localCpuInferenceDispatcher),
+            isAccessAllowed = ::isLocalInferenceAllowed,
+            isModelInstalled = { localModelAssetStore.isInstalled() }
+        )
+    }
+    internal val localChatController: LocalChatController get() = localChatControllerLazy.value
+
+    private fun purgeLocalChatHistoryForPanicReset(): Boolean {
+        if (localChatControllerLazy.isInitialized()) {
+            localChatControllerLazy.value.wipeForPanicReset()
+        }
+        return localChatHistoryStoreLazy.value.clear().isSuccess
+    }
+
     /** Production inference is bound to the source-built CPU-only JNI backend; GPU delegates are rejected. */
     val localInferenceEngine: LocalInferenceEngine by lazy {
         val context = checkNotNull(applicationContext) {
@@ -317,7 +354,11 @@ class AgentContainer(
     val asyncJobManager: AsyncJobManager by lazy { AsyncJobManager() }
 
     val panicResetPhaseXVIHooks: PanicResetPhaseXVIHooks by lazy {
-        RealPanicResetPhaseXVIHooks(asyncJobManager, sharedWorkspaceManager)
+        RealPanicResetPhaseXVIHooks(
+            asyncJobManager,
+            sharedWorkspaceManager,
+            ::purgeLocalChatHistoryForPanicReset
+        )
     }
 
     private val panicResetBenchmarkWorkCanceller: PanicResetBenchmarkWorkCanceller by lazy {

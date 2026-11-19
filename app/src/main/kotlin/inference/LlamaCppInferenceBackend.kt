@@ -23,6 +23,16 @@ internal data class NativeGenerationResult(
     val decodeElapsedNanos: Long
 )
 
+internal data class NativeChatMessage(val role: String, val content: String) {
+    override fun toString(): String = "NativeChatMessage(role=$role, content=<redacted>)"
+}
+
+internal interface NativeChatCallback {
+    fun onPromptTokenCount(tokenCount: Int)
+    /** Delivers a cumulative, valid-text snapshot of all output generated so far. */
+    fun onTextSnapshot(snapshot: String)
+}
+
 internal data class LlamaRuntimeMeasurements(
     val modelLoadTimeMs: Long,
     val firstTokenTimeMs: Long,
@@ -52,6 +62,30 @@ internal interface LlamaNativeBridge {
 
     /** Counts the exact model-formatted prompt without generating tokens; -1 means unavailable. */
     fun countPromptTokens(handle: Long, context: String, prompt: String): Int = -1
+
+    /** Counts a system prompt plus role-preserving chat turns after applying the model template. */
+    fun countConversationTokens(
+        handle: Long,
+        systemPrompt: String,
+        messages: List<NativeChatMessage>
+    ): Int = countPromptTokens(handle, systemPrompt, flattenConversation(messages))
+
+    /** Test-compatible fallback; production JNI overrides this with role-preserving template input. */
+    fun generateConversation(
+        handle: Long,
+        systemPrompt: String,
+        messages: List<NativeChatMessage>,
+        maxTokens: Int,
+        temperature: Float,
+        topP: Float,
+        callback: NativeChatCallback?
+    ): NativeGenerationResult {
+        val prompt = flattenConversation(messages)
+        val result = generate(handle, systemPrompt, prompt, maxTokens, temperature, topP, null)
+        callback?.onPromptTokenCount(result.promptTokens)
+        if (result.text.isNotEmpty()) callback?.onTextSnapshot(result.text)
+        return result
+    }
 
     fun releaseModel(handle: Long)
 
@@ -106,6 +140,36 @@ internal object JniLlamaBridge : LlamaNativeBridge {
         return nativeCountPromptTokens(handle, context, prompt)
     }
 
+    override fun countConversationTokens(
+        handle: Long,
+        systemPrompt: String,
+        messages: List<NativeChatMessage>
+    ): Int {
+        requireLibrary()
+        return nativeCountConversationTokens(handle, systemPrompt, messages.toTypedArray())
+    }
+
+    override fun generateConversation(
+        handle: Long,
+        systemPrompt: String,
+        messages: List<NativeChatMessage>,
+        maxTokens: Int,
+        temperature: Float,
+        topP: Float,
+        callback: NativeChatCallback?
+    ): NativeGenerationResult {
+        requireLibrary()
+        return nativeGenerateConversation(
+            handle,
+            systemPrompt,
+            messages.toTypedArray(),
+            maxTokens,
+            temperature,
+            topP,
+            callback
+        )
+    }
+
     override fun releaseModel(handle: Long) {
         requireLibrary()
         nativeReleaseModel(handle)
@@ -149,6 +213,20 @@ internal object JniLlamaBridge : LlamaNativeBridge {
         grammar: String?
     ): NativeGenerationResult
     private external fun nativeCountPromptTokens(handle: Long, context: String, prompt: String): Int
+    private external fun nativeCountConversationTokens(
+        handle: Long,
+        systemPrompt: String,
+        messages: Array<NativeChatMessage>
+    ): Int
+    private external fun nativeGenerateConversation(
+        handle: Long,
+        systemPrompt: String,
+        messages: Array<NativeChatMessage>,
+        maxTokens: Int,
+        temperature: Float,
+        topP: Float,
+        callback: NativeChatCallback?
+    ): NativeGenerationResult
     private external fun nativeReleaseModel(handle: Long)
     private external fun nativeCancelGeneration(handle: Long)
     private external fun nativeGetThreadAffinity(): IntArray?
@@ -326,6 +404,146 @@ class LlamaCppInferenceBackend internal constructor(
         }
     }
 
+    /** Counts the production conversation template, including system and all retained turns. */
+    internal fun formattedConversationTokenCount(
+        systemPrompt: String,
+        messages: List<NativeChatMessage>,
+        isStillAllowed: () -> Boolean = { true }
+    ): Result<Int> {
+        if (!isStillAllowedSafely(isStillAllowed)) {
+            return failure(InferenceError.Unavailable("Local chat access was closed"))
+        }
+        val modelFile = modelAssetStore.verifiedModelFile()
+            ?: return failure(InferenceError.Unavailable("Import the SHA-256-verified Qwen3 model before local inference"))
+        return try {
+            val count = lock.withLock {
+                if (!isStillAllowedSafely(isStillAllowed)) throw LocalChatAccessClosedException()
+                val loaded = ensureLoaded(modelFile)
+                if (!isStillAllowedSafely(isStillAllowed)) throw LocalChatAccessClosedException()
+                bridge.countConversationTokens(loaded.handle, systemPrompt, messages)
+            }
+            if (!isStillAllowedSafely(isStillAllowed)) {
+                failure(InferenceError.Unavailable("Local chat access was closed"))
+            } else if (count <= 0) {
+                failure(InferenceError.Unavailable("The formatted prompt token count is unavailable"))
+            } else {
+                Result.success(count)
+            }
+        } catch (_: OutOfMemoryError) {
+            failure(InferenceError.ResourceExhausted("The formatted prompt could not be allocated"))
+        } catch (_: LocalChatAccessClosedException) {
+            failure(InferenceError.Unavailable("Local chat access was closed"))
+        } catch (_: Exception) {
+            failure(InferenceError.Unavailable("The formatted prompt could not be counted"))
+        }
+    }
+
+    /** Runs a role-preserving chat prompt and forwards bounded cumulative snapshots from JNI. */
+    internal fun generateConversationMeasured(
+        systemPrompt: String,
+        messages: List<NativeChatMessage>,
+        maxTokens: Int,
+        temperature: Float,
+        topP: Float,
+        isStillAllowed: () -> Boolean = { true },
+        onPromptTokenCount: (Int) -> Unit = {},
+        onTextSnapshot: (String) -> Unit
+    ): Result<MeasuredLlamaInference> {
+        if (!isStillAllowedSafely(isStillAllowed)) {
+            return failure(InferenceError.Unavailable("Local chat access was closed"))
+        }
+        if (maxTokens <= 0 || maxTokens > contextTokens) {
+            return failure(InferenceError.ResourceExhausted("Requested output budget is outside the configured context window"))
+        }
+        if (!temperature.isFinite() || temperature < 0f || !topP.isFinite() || topP <= 0f || topP > 1f) {
+            return failure(InferenceError.Malformed("Sampling parameters are invalid"))
+        }
+        val modelFile = modelAssetStore.verifiedModelFile()
+            ?: return failure(InferenceError.Unavailable("Import the SHA-256-verified Qwen3 model before local inference"))
+        val promptTokenCallback = onPromptTokenCount
+        val textSnapshotCallback = onTextSnapshot
+
+        return try {
+            var modelLoadNanos = 0L
+            val nativeResult = lock.withLock {
+                if (!isStillAllowedSafely(isStillAllowed)) throw LocalChatAccessClosedException()
+                val loaded = ensureLoaded(modelFile)
+                modelLoadNanos = loaded.loadDurationNanos
+                if (!isStillAllowedSafely(isStillAllowed)) throw LocalChatAccessClosedException()
+                bridge.generateConversation(
+                    handle = loaded.handle,
+                    systemPrompt = systemPrompt,
+                    messages = messages,
+                    maxTokens = maxTokens,
+                    temperature = temperature,
+                    topP = topP,
+                    callback = object : NativeChatCallback {
+                        override fun onPromptTokenCount(tokenCount: Int) {
+                            if (isStillAllowedSafely(isStillAllowed) && tokenCount > 0) {
+                                promptTokenCallback(tokenCount)
+                            }
+                        }
+
+                        override fun onTextSnapshot(snapshot: String) {
+                            if (isStillAllowedSafely(isStillAllowed)) textSnapshotCallback(snapshot)
+                        }
+                    }
+                )
+            }
+            if (!isStillAllowedSafely(isStillAllowed)) {
+                return failure(InferenceError.Unavailable("Local chat access was closed"))
+            }
+            if (nativeResult.promptTokens <= 0 || nativeResult.completionTokens < 0 ||
+                nativeResult.prefillElapsedNanos < 0L ||
+                nativeResult.firstTokenElapsedNanos < 0L ||
+                nativeResult.decodeElapsedNanos < 0L
+            ) {
+                return failure(InferenceError.Unavailable("Native chat timing data was unavailable"))
+            }
+            val prefillRate = if (nativeResult.prefillElapsedNanos > 0L) {
+                nativeResult.promptTokens.toDouble() * NANOSECONDS_PER_SECOND /
+                    nativeResult.prefillElapsedNanos.toDouble()
+            } else null
+            val decodeTokensAfterFirst = (nativeResult.completionTokens - 1).coerceAtLeast(0)
+            val decodeRate = if (decodeTokensAfterFirst > 0 && nativeResult.decodeElapsedNanos > 0L) {
+                decodeTokensAfterFirst.toDouble() * NANOSECONDS_PER_SECOND /
+                    nativeResult.decodeElapsedNanos.toDouble()
+            } else null
+            if ((prefillRate != null && !prefillRate.isFinite()) ||
+                (decodeRate != null && !decodeRate.isFinite())
+            ) {
+                return failure(InferenceError.Unavailable("Native chat timing data was unavailable"))
+            }
+            Result.success(
+                MeasuredLlamaInference(
+                    response = InferenceResponse(
+                        text = nativeResult.text,
+                        usage = TokenUsage(
+                            prompt_tokens = nativeResult.promptTokens,
+                            completion_tokens = nativeResult.completionTokens
+                        ),
+                        finish_reason = nativeResult.finishReason
+                    ),
+                    measurements = LlamaRuntimeMeasurements(
+                        modelLoadTimeMs = TimeUnit.NANOSECONDS.toMillis(modelLoadNanos.coerceAtLeast(0L)),
+                        firstTokenTimeMs = TimeUnit.NANOSECONDS.toMillis(nativeResult.firstTokenElapsedNanos),
+                        prefillTokensPerSecond = prefillRate,
+                        decodeTokensPerSecond = decodeRate,
+                        tokenCount = nativeResult.completionTokens
+                    )
+                )
+            )
+        } catch (_: OutOfMemoryError) {
+            failure(InferenceError.ResourceExhausted("The CPU model or context could not be allocated"))
+        } catch (_: LocalChatAccessClosedException) {
+            failure(InferenceError.Unavailable("Local chat access was closed"))
+        } catch (_: LinkageError) {
+            failure(InferenceError.Unavailable("The source-built CPU inference library could not be loaded"))
+        } catch (_: Exception) {
+            failure(InferenceError.Unavailable("Native CPU chat inference failed"))
+        }
+    }
+
     internal fun currentThreadAffinity(): List<Int>? = runCatching {
         bridge.currentThreadAffinity()?.toList()
     }.getOrNull()
@@ -390,6 +608,7 @@ class LlamaCppInferenceBackend internal constructor(
         runCatching(check).getOrDefault(false)
 
     private class LocalSelfTestStoppedException : IllegalStateException("Local self-test was stopped")
+    private class LocalChatAccessClosedException : IllegalStateException("Local chat access was closed")
 
     private fun grammarFor(outputSchema: String?): String? {
         if (outputSchema == null) return null
@@ -401,3 +620,8 @@ class LlamaCppInferenceBackend internal constructor(
     private fun <T> failure(error: InferenceError): Result<T> =
         Result.failure(AgentModelException(error))
 }
+
+private fun flattenConversation(messages: List<NativeChatMessage>): String =
+    messages.joinToString(separator = "\n") { message ->
+        "${message.role}: ${message.content}"
+    }

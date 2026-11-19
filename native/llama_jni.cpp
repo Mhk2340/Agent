@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -13,6 +14,7 @@
 #include <sched.h>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -247,6 +249,122 @@ std::string formatPrompt(
         throw std::runtime_error("Could not format the model chat prompt");
     }
     return std::string(buffer.data(), static_cast<size_t>(actual));
+}
+
+std::string formatConversationPrompt(
+    const llama_model * model,
+    const std::string & systemPrompt,
+    const std::vector<std::string> & roles,
+    const std::vector<std::string> & contents
+) {
+    if (roles.size() != contents.size()) {
+        throw std::invalid_argument("Conversation role and content counts do not match");
+    }
+    const char * chatTemplate = llama_model_chat_template(model, nullptr);
+    if (chatTemplate == nullptr) {
+        throw std::invalid_argument("The verified model does not contain a chat template");
+    }
+
+    std::vector<std::string> stableRoles;
+    std::vector<std::string> stableContents;
+    stableRoles.reserve(roles.size() + (systemPrompt.empty() ? 0 : 1));
+    stableContents.reserve(contents.size() + (systemPrompt.empty() ? 0 : 1));
+    if (!systemPrompt.empty()) {
+        stableRoles.emplace_back("system");
+        stableContents.push_back(systemPrompt);
+    }
+    for (size_t index = 0; index < roles.size(); ++index) {
+        stableRoles.push_back(roles[index]);
+        stableContents.push_back(contents[index]);
+    }
+
+    std::vector<llama_chat_message> chatMessages;
+    chatMessages.reserve(stableRoles.size());
+    for (size_t index = 0; index < stableRoles.size(); ++index) {
+        chatMessages.push_back({stableRoles[index].c_str(), stableContents[index].c_str()});
+    }
+    const int32_t required = llama_chat_apply_template(
+        chatTemplate,
+        chatMessages.data(),
+        chatMessages.size(),
+        true,
+        nullptr,
+        int32_t{}
+    );
+    if (required < 0 || required == std::numeric_limits<int32_t>::max()) {
+        throw std::invalid_argument("The pinned llama.cpp build cannot apply this model chat template");
+    }
+    std::vector<char> buffer(static_cast<size_t>(required) + 1, '\0');
+    const int32_t actual = llama_chat_apply_template(
+        chatTemplate,
+        chatMessages.data(),
+        chatMessages.size(),
+        true,
+        buffer.data(),
+        static_cast<int32_t>(buffer.size())
+    );
+    if (actual < 0 || actual > required) {
+        throw std::runtime_error("Could not format the model conversation prompt");
+    }
+    return std::string(buffer.data(), static_cast<size_t>(actual));
+}
+
+void readConversationMessages(
+    JNIEnv * env,
+    jobjectArray messageArray,
+    std::vector<std::string> & roles,
+    std::vector<std::string> & contents
+) {
+    if (messageArray == nullptr) {
+        throw std::invalid_argument("Conversation messages are required");
+    }
+    const jsize messageCount = env->GetArrayLength(messageArray);
+    if (messageCount <= 0 || messageCount > 512) {
+        throw std::invalid_argument("Conversation message count is outside the supported range");
+    }
+    roles.reserve(static_cast<size_t>(messageCount));
+    contents.reserve(static_cast<size_t>(messageCount));
+    for (jsize index = 0; index < messageCount; ++index) {
+        jobject message = env->GetObjectArrayElement(messageArray, index);
+        if (message == nullptr) {
+            throw std::invalid_argument("Conversation message is invalid");
+        }
+        jclass messageClass = env->GetObjectClass(message);
+        if (messageClass == nullptr) {
+            env->DeleteLocalRef(message);
+            throw std::runtime_error("Conversation message type is unavailable");
+        }
+        const jmethodID roleGetter = env->GetMethodID(messageClass, "getRole", "()Ljava/lang/String;");
+        const jmethodID contentGetter = env->GetMethodID(messageClass, "getContent", "()Ljava/lang/String;");
+        if (roleGetter == nullptr || contentGetter == nullptr) {
+            env->DeleteLocalRef(messageClass);
+            env->DeleteLocalRef(message);
+            throw std::runtime_error("Conversation message fields are unavailable");
+        }
+        auto roleValue = static_cast<jstring>(env->CallObjectMethod(message, roleGetter));
+        auto contentValue = static_cast<jstring>(env->CallObjectMethod(message, contentGetter));
+        if (env->ExceptionCheck() || roleValue == nullptr || contentValue == nullptr) {
+            if (roleValue != nullptr) env->DeleteLocalRef(roleValue);
+            if (contentValue != nullptr) env->DeleteLocalRef(contentValue);
+            env->DeleteLocalRef(messageClass);
+            env->DeleteLocalRef(message);
+            throw std::runtime_error("Conversation message fields could not be read");
+        }
+        std::string role = fromJavaString(env, roleValue);
+        std::string content = fromJavaString(env, contentValue);
+        env->DeleteLocalRef(roleValue);
+        env->DeleteLocalRef(contentValue);
+        env->DeleteLocalRef(messageClass);
+        env->DeleteLocalRef(message);
+        if (role != "user" && role != "assistant") {
+            throw std::invalid_argument("Only user and assistant roles are supported in a local conversation");
+        }
+        if (content.find('\0') != std::string::npos) {
+            throw std::invalid_argument("Conversation text cannot contain a null character");
+        }
+        roles.push_back(std::move(role));
+        contents.push_back(std::move(content));
+    }
 }
 
 std::vector<llama_token> tokenizePrompt(const llama_vocab * vocab, const std::string & prompt) {
@@ -549,6 +667,50 @@ Java_inference_JniLlamaBridge_nativeCountPromptTokens(
     return -1;
 }
 
+extern "C" JNIEXPORT jint JNICALL
+Java_inference_JniLlamaBridge_nativeCountConversationTokens(
+    JNIEnv * env,
+    jobject,
+    jlong handle,
+    jstring systemPromptValue,
+    jobjectArray messageArray
+) {
+    try {
+        NativeSession * session = sessionFromHandle(handle);
+        if (session == nullptr || session->model == nullptr) {
+            throw std::invalid_argument("The native model handle is invalid");
+        }
+        const std::string systemPrompt = fromJavaString(env, systemPromptValue);
+        if (systemPrompt.find('\0') != std::string::npos) {
+            throw std::invalid_argument("System prompt cannot contain a null character");
+        }
+        std::vector<std::string> roles;
+        std::vector<std::string> contents;
+        readConversationMessages(env, messageArray, roles, contents);
+
+        std::lock_guard<std::mutex> guard(session->mutex);
+        const std::string formattedPrompt = formatConversationPrompt(
+            session->model,
+            systemPrompt,
+            roles,
+            contents
+        );
+        const auto promptTokens = tokenizePrompt(llama_model_get_vocab(session->model), formattedPrompt);
+        if (promptTokens.empty() ||
+            promptTokens.size() > static_cast<size_t>(std::numeric_limits<jint>::max())) {
+            throw std::runtime_error("The formatted conversation token count is unavailable");
+        }
+        return static_cast<jint>(promptTokens.size());
+    } catch (const std::bad_alloc &) {
+        throwJava(env, "java/lang/OutOfMemoryError", "The conversation token count could not be allocated");
+    } catch (const std::exception & error) {
+        throwJava(env, "java/lang/IllegalStateException", error.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Conversation token counting failed");
+    }
+    return -1;
+}
+
 extern "C" JNIEXPORT jobject JNICALL
 Java_inference_JniLlamaBridge_nativeGenerate(
     JNIEnv * env,
@@ -704,6 +866,221 @@ Java_inference_JniLlamaBridge_nativeGenerate(
         throwJava(env, "java/lang/IllegalStateException", error.what());
     } catch (...) {
         throwJava(env, "java/lang/IllegalStateException", "Unknown native generation failure");
+    }
+    return nullptr;
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_inference_JniLlamaBridge_nativeGenerateConversation(
+    JNIEnv * env,
+    jobject,
+    jlong handle,
+    jstring systemPromptValue,
+    jobjectArray messageArray,
+    jint maxTokens,
+    jfloat temperature,
+    jfloat topP,
+    jobject callback
+) {
+    try {
+        NativeSession * session = sessionFromHandle(handle);
+        if (session == nullptr || session->model == nullptr || session->context == nullptr) {
+            throw std::invalid_argument("The native model handle is invalid");
+        }
+        if (maxTokens <= 0 || !std::isfinite(temperature) || temperature < 0.0f ||
+            !std::isfinite(topP) || topP <= 0.0f || topP > 1.0f) {
+            throw std::invalid_argument("Chat generation parameters are invalid");
+        }
+        if (callback == nullptr) {
+            throw std::invalid_argument("A local chat stream callback is required");
+        }
+        const std::string systemPrompt = fromJavaString(env, systemPromptValue);
+        if (systemPrompt.find('\0') != std::string::npos) {
+            throw std::invalid_argument("System prompt cannot contain a null character");
+        }
+        std::vector<std::string> roles;
+        std::vector<std::string> contents;
+        readConversationMessages(env, messageArray, roles, contents);
+        jclass callbackClass = env->GetObjectClass(callback);
+        if (callbackClass == nullptr) {
+            throw std::runtime_error("The local chat stream callback type is unavailable");
+        }
+        const jmethodID promptCountMethod = env->GetMethodID(callbackClass, "onPromptTokenCount", "(I)V");
+        const jmethodID textSnapshotMethod = env->GetMethodID(
+            callbackClass,
+            "onTextSnapshot",
+            "(Ljava/lang/String;)V"
+        );
+        if (promptCountMethod == nullptr || textSnapshotMethod == nullptr) {
+            env->DeleteLocalRef(callbackClass);
+            throw std::runtime_error("The local chat stream callback methods are unavailable");
+        }
+
+        std::lock_guard<std::mutex> guard(session->mutex);
+        const auto generationStarted = std::chrono::steady_clock::now();
+        const std::string formattedPrompt = formatConversationPrompt(
+            session->model,
+            systemPrompt,
+            roles,
+            contents
+        );
+        const llama_vocab * vocab = llama_model_get_vocab(session->model);
+        std::vector<llama_token> promptTokens = tokenizePrompt(vocab, formattedPrompt);
+        if (promptTokens.empty() ||
+            promptTokens.size() > static_cast<size_t>(std::numeric_limits<jint>::max())) {
+            env->DeleteLocalRef(callbackClass);
+            throw std::invalid_argument("The formatted conversation produced no usable tokens");
+        }
+        const uint64_t totalTokens = static_cast<uint64_t>(promptTokens.size()) + static_cast<uint64_t>(maxTokens);
+        if (totalTokens > static_cast<uint64_t>(session->contextTokens)) {
+            env->DeleteLocalRef(callbackClass);
+            throw std::bad_alloc();
+        }
+        env->CallVoidMethod(callback, promptCountMethod, static_cast<jint>(promptTokens.size()));
+        if (env->ExceptionCheck()) {
+            env->DeleteLocalRef(callbackClass);
+            throw std::runtime_error("The prompt token callback failed");
+        }
+
+        llama_memory_clear(llama_get_memory(session->context), true);
+        const auto prefillStarted = std::chrono::steady_clock::now();
+        for (size_t promptOffset = 0; promptOffset < promptTokens.size();) {
+            if (session->abortRequested.load(std::memory_order_relaxed)) {
+                env->DeleteLocalRef(callbackClass);
+                throw std::runtime_error("Local chat generation was cancelled");
+            }
+            const size_t batchTokenCount = std::min<size_t>(
+                static_cast<size_t>(session->batchTokens),
+                promptTokens.size() - promptOffset
+            );
+            const llama_batch promptBatch = llama_batch_get_one(
+                promptTokens.data() + promptOffset,
+                static_cast<int32_t>(batchTokenCount)
+            );
+            checkDecodeStatus(llama_decode(session->context, promptBatch));
+            promptOffset += batchTokenCount;
+        }
+        const jlong prefillElapsedNanos = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - prefillStarted
+        ).count();
+
+        llama_sampler_chain_params samplerParams = llama_sampler_chain_default_params();
+        samplerParams.no_perf = true;
+        std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)> sampler(
+            llama_sampler_chain_init(samplerParams),
+            llama_sampler_free
+        );
+        if (!sampler) {
+            env->DeleteLocalRef(callbackClass);
+            throw std::bad_alloc();
+        }
+        constexpr size_t kTopPMinKeep = 1;
+        if (temperature <= 0.0f) {
+            llama_sampler * greedySampler = llama_sampler_init_greedy();
+            if (greedySampler == nullptr) {
+                env->DeleteLocalRef(callbackClass);
+                throw std::bad_alloc();
+            }
+            llama_sampler_chain_add(sampler.get(), greedySampler);
+        } else {
+            llama_sampler * topPSampler = llama_sampler_init_top_p(topP, kTopPMinKeep);
+            llama_sampler * temperatureSampler = llama_sampler_init_temp(temperature);
+            llama_sampler * distributionSampler = llama_sampler_init_dist(LLAMA_DEFAULT_SEED);
+            if (topPSampler == nullptr || temperatureSampler == nullptr || distributionSampler == nullptr) {
+                if (topPSampler != nullptr) llama_sampler_free(topPSampler);
+                if (temperatureSampler != nullptr) llama_sampler_free(temperatureSampler);
+                if (distributionSampler != nullptr) llama_sampler_free(distributionSampler);
+                env->DeleteLocalRef(callbackClass);
+                throw std::bad_alloc();
+            }
+            llama_sampler_chain_add(sampler.get(), topPSampler);
+            llama_sampler_chain_add(sampler.get(), temperatureSampler);
+            llama_sampler_chain_add(sampler.get(), distributionSampler);
+        }
+
+        constexpr int32_t kLastLogitsIndex = -1;
+        std::vector<llama_token> outputTokens;
+        std::string finishReason = "max_tokens";
+        jlong firstTokenElapsedNanos{};
+        jlong decodeElapsedNanos{};
+        bool firstTokenRecorded = false;
+        auto lastStreamSnapshot = std::chrono::steady_clock::now();
+        for (jint produced = 0; produced < maxTokens; ++produced) {
+            if (session->abortRequested.load(std::memory_order_relaxed)) {
+                env->DeleteLocalRef(callbackClass);
+                throw std::runtime_error("Local chat generation was cancelled");
+            }
+            const llama_token token = llama_sampler_sample(sampler.get(), session->context, kLastLogitsIndex);
+            const jlong tokenElapsedNanos = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - generationStarted
+            ).count();
+            if (llama_vocab_is_eog(vocab, token)) {
+                finishReason = "stop";
+                break;
+            }
+            if (!firstTokenRecorded) {
+                firstTokenElapsedNanos = tokenElapsedNanos;
+                firstTokenRecorded = true;
+            } else {
+                decodeElapsedNanos = tokenElapsedNanos - firstTokenElapsedNanos;
+            }
+            outputTokens.push_back(token);
+            const auto now = std::chrono::steady_clock::now();
+            const bool firstOutput = outputTokens.size() == 1;
+            const bool streamIntervalElapsed = now - lastStreamSnapshot >= std::chrono::milliseconds(40);
+            const bool outputLimitReached = produced + 1 >= maxTokens;
+            if (firstOutput || streamIntervalElapsed || outputLimitReached) {
+                const std::string snapshot = detokenize(vocab, outputTokens);
+                jstring javaSnapshot = toJavaString(env, snapshot);
+                if (javaSnapshot == nullptr) {
+                    env->DeleteLocalRef(callbackClass);
+                    throw std::bad_alloc();
+                }
+                env->CallVoidMethod(callback, textSnapshotMethod, javaSnapshot);
+                env->DeleteLocalRef(javaSnapshot);
+                if (env->ExceptionCheck()) {
+                    env->DeleteLocalRef(callbackClass);
+                    throw std::runtime_error("The local chat text callback failed");
+                }
+                lastStreamSnapshot = now;
+            }
+            if (produced + 1 < maxTokens) {
+                const llama_batch nextBatch = llama_batch_get_one(&outputTokens.back(), kSingleTokenBatchSize);
+                checkDecodeStatus(llama_decode(session->context, nextBatch));
+            }
+        }
+
+        const std::string outputText = detokenize(vocab, outputTokens);
+        if (!outputTokens.empty()) {
+            jstring javaSnapshot = toJavaString(env, outputText);
+            if (javaSnapshot == nullptr) {
+                env->DeleteLocalRef(callbackClass);
+                throw std::bad_alloc();
+            }
+            env->CallVoidMethod(callback, textSnapshotMethod, javaSnapshot);
+            env->DeleteLocalRef(javaSnapshot);
+            if (env->ExceptionCheck()) {
+                env->DeleteLocalRef(callbackClass);
+                throw std::runtime_error("The final local chat text callback failed");
+            }
+        }
+        env->DeleteLocalRef(callbackClass);
+        return makeGenerationResult(
+            env,
+            outputText,
+            static_cast<jint>(promptTokens.size()),
+            static_cast<jint>(outputTokens.size()),
+            finishReason,
+            prefillElapsedNanos,
+            firstTokenElapsedNanos,
+            decodeElapsedNanos
+        );
+    } catch (const std::bad_alloc &) {
+        throwJava(env, "java/lang/OutOfMemoryError", "The CPU chat context could not process this request");
+    } catch (const std::exception & error) {
+        throwJava(env, "java/lang/IllegalStateException", error.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Unknown native chat generation failure");
     }
     return nullptr;
 }

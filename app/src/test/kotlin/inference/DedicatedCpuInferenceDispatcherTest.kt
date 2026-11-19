@@ -78,6 +78,8 @@ class DedicatedCpuInferenceDispatcherTest {
 
         override fun systemInfo(): String = "CPU fixture"
 
+        override fun countPromptTokens(handle: Long, context: String, prompt: String): Int = PROMPT_TOKEN_COUNT
+
         override fun generate(
             handle: Long,
             context: String,
@@ -294,6 +296,40 @@ class DedicatedCpuInferenceDispatcherTest {
             assertEquals(listOf(2, 3), bridge.configuredThreadCounts)
             assertEquals(listOf(AffinityBridge.STRONG_CORES, secondStrongSet), bridge.loadAffinityMasks)
             assertEquals(listOf(AffinityBridge.BASELINE_CORES), bridge.releasedAffinityMasks)
+            assertEquals(AffinityBridge.BASELINE_CORES, workerMaskReads(bridge).last())
+        } finally {
+            dispatcher.close()
+        }
+    }
+
+    @Test
+    fun chatCountingAndStreamingStayOnAffinityWorkerAndPreserveCallbackOrder() {
+        val bridge = AffinityBridge()
+        val dispatcher = dispatcher(bridge)
+        val callbacks = mutableListOf<String>()
+        try {
+            val messages = listOf(NativeChatMessage("user", "A harmless chat prompt"))
+            val count = dispatcher.countConversationTokens("system instructions", messages)
+            val generated = dispatcher.generateConversation(
+                systemPrompt = "system instructions",
+                messages = messages,
+                maxTokens = OUTPUT_TOKENS,
+                temperature = 0f,
+                topP = 1f,
+                onPromptTokenCount = { callbacks += Thread.currentThread().name },
+                onTextSnapshot = { callbacks += Thread.currentThread().name }
+            )
+
+            assertTrue(count.isSuccess)
+            assertEquals(AffinityBridge.PROMPT_TOKEN_COUNT, count.getOrThrow())
+            assertTrue(generated.isSuccess)
+            assertEquals("fixed fake output", generated.getOrThrow().response.text)
+            assertEquals(
+                listOf("agent-dedicated-cpu-inference", "agent-dedicated-cpu-inference"),
+                callbacks
+            )
+            assertEquals(listOf(AffinityBridge.STRONG_CORES), bridge.loadAffinityMasks)
+            assertEquals(listOf(AffinityBridge.STRONG_CORES), bridge.generatedAffinityMasks)
             assertEquals(AffinityBridge.BASELINE_CORES, workerMaskReads(bridge).last())
         } finally {
             dispatcher.close()

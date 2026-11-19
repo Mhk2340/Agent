@@ -134,6 +134,11 @@ class RealSecurityLockdownEnforcer(
         attempt("active-async-jobs") { phaseXVIHooks.cancelActiveJobs() }
         attempt("benchmark-work") { benchmarkWorkCanceller.cancelForPanicReset() }
         attempt("shared-workspace") { phaseXVIHooks.purgeActiveSharedWorkspace() }
+        attempt("local-chat-history") {
+            if (!phaseXVIHooks.purgeLocalChatHistory()) {
+                throw IllegalStateException("Local chat history could not be purged")
+            }
+        }
         attempt("policy-config") { configStoreResetHook.resetConfigStoreToSeedDefaults() }
 
         var newEpoch: Long? = null

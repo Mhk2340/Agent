@@ -9,7 +9,8 @@ import security.PanicResetPhaseXVIHooks
  */
 class RealPanicResetPhaseXVIHooks(
     private val jobManager: AsyncJobManager,
-    private val workspaceManager: SharedWorkspaceManager
+    private val workspaceManager: SharedWorkspaceManager,
+    private val purgeLocalChatHistoryAction: () -> Boolean = { true }
 ) : PanicResetPhaseXVIHooks {
 
     override fun cancelActiveJobs(): Int {
@@ -29,4 +30,6 @@ class RealPanicResetPhaseXVIHooks(
         )
         return true
     }
+
+    override fun purgeLocalChatHistory(): Boolean = purgeLocalChatHistoryAction()
 }
