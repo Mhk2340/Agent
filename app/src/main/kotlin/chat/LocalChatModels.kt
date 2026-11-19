@@ -1,5 +1,6 @@
 package chat
 
+import diagnostics.DiagnosticCode
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -92,7 +93,10 @@ data class LocalChatUiState(
     val phase: LocalChatGenerationPhase = LocalChatGenerationPhase.IDLE,
     val promptTokenCount: Int? = null,
     val error: LocalChatError? = null,
-    val olderContextTrimmed: Boolean = false
+    val olderContextTrimmed: Boolean = false,
+    val isHistoryEphemeral: Boolean = false,
+    val historyDiagnosticCode: DiagnosticCode? = null,
+    val historyExceptionClass: Class<out Throwable>? = null
 ) {
     override fun toString(): String =
         "LocalChatUiState(conversation=<redacted>, savedConversationCount=$savedConversationCount, " +

@@ -3,6 +3,8 @@ package chat
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import diagnostics.DiagnosticCode
+import diagnostics.DiagnosticsLog
 import org.junit.Test
 import java.io.Closeable
 import java.util.concurrent.CountDownLatch
@@ -145,6 +147,70 @@ class LocalChatControllerTest {
     }
 
     @Test
+    fun failedEncryptedWriteFallsBackToMemoryOnlyAndStillSendsSuccessfully() {
+        val persistentStore = FailingWriteHistoryStore()
+        val inference = FakeInference().apply { countPrompt = { _, messages -> messages.size * 10 } }
+        val controller = LocalChatController(
+            historyStore = persistentStore,
+            inference = inference,
+            isAccessAllowed = { true },
+            isModelInstalled = { true },
+            clock = { 100L },
+            newId = { "fallback-${ID.incrementAndGet()}" }
+        )
+        try {
+            controller.open()
+            await { !controller.state().isHistoryLoading }
+            assertTrue(controller.state().isHistoryEphemeral)
+            assertEquals(diagnostics.DiagnosticCode.CHAT_STORE_CRYPTO_FAILURE, controller.state().historyDiagnosticCode)
+
+            assertTrue(controller.send("سلام"))
+            await {
+                !controller.state().isGenerating &&
+                    controller.state().activeConversation?.messages?.lastOrNull()?.content == "final answer"
+            }
+            assertEquals("سلام", controller.state().activeConversation!!.messages.first().content)
+            assertTrue(controller.state().isHistoryEphemeral)
+            assertEquals(1, persistentStore.writeCalls.get())
+            assertEquals(1, inference.generateCalls.get())
+        } finally {
+            controller.close()
+        }
+    }
+
+    @Test
+    fun failedGenerationMarksTheUserMessageForRetryAndDoesNotKeepAnEmptyAssistantBubble() {
+        val diagnosticLog = DiagnosticsLog()
+        val inference = FakeInference().apply {
+            countPrompt = { _, messages -> messages.size * 10 }
+            generationFailure = IllegalStateException("private prompt must not be logged")
+        }
+        val controller = LocalChatController(
+            historyStore = MemoryHistoryStore(),
+            inference = inference,
+            isAccessAllowed = { true },
+            isModelInstalled = { true },
+            diagnostics = diagnosticLog
+        )
+        try {
+            controller.open()
+            await { !controller.state().isHistoryLoading }
+            assertTrue(controller.send("retry me"))
+            await { !controller.state().isGenerating && controller.state().error == LocalChatError.GENERATION_FAILED }
+
+            val messages = controller.state().activeConversation!!.messages
+            assertEquals(1, messages.size)
+            assertEquals(LocalChatRole.USER, messages.single().role)
+            assertEquals(LocalChatMessageStatus.FAILED, messages.single().status)
+            val report = diagnosticLog.snapshot().joinToString("\n")
+            assertTrue(report.contains(DiagnosticCode.CHAT_SEND_FAILED.wireCode))
+            assertFalse(report.contains("private prompt must not be logged"))
+        } finally {
+            controller.close()
+        }
+    }
+
+    @Test
     fun draftSurvivesControllerReuseAndIsClearedWhenAppLockCloses() {
         val allowed = AtomicReference(true)
         val controller = controller(MemoryHistoryStore(), FakeInference(), isAllowed = { allowed.get() })
@@ -227,6 +293,22 @@ class LocalChatControllerTest {
     private fun user(id: String, text: String) = LocalChatMessage(id, LocalChatRole.USER, text, 1L)
     private fun assistant(id: String, text: String) = LocalChatMessage(id, LocalChatRole.ASSISTANT, text, 2L)
 
+    private class FailingWriteHistoryStore : LocalChatHistoryStore {
+        val writeCalls = AtomicInteger()
+
+        override fun read(): Result<LocalChatArchive> = Result.success(LocalChatArchive())
+        override fun write(archive: LocalChatArchive): Result<Unit> {
+            writeCalls.incrementAndGet()
+            return Result.failure(
+                ChatHistoryStorageException(
+                    diagnostics.DiagnosticCode.CHAT_STORE_CRYPTO_FAILURE,
+                    IllegalStateException::class.java
+                )
+            )
+        }
+        override fun clear(): Result<Unit> = Result.success(Unit)
+    }
+
     private class MemoryHistoryStore(initial: LocalChatArchive = LocalChatArchive()) : LocalChatHistoryStore {
         @Volatile
         var archive: LocalChatArchive = initial
@@ -252,6 +334,8 @@ class LocalChatControllerTest {
         var blockUntilStopped = false
         @Volatile
         var blockAfterFirstSnapshot = false
+        @Volatile
+        var generationFailure: Throwable? = null
         @Volatile
         var generatedMessages = AtomicReference<List<LocalChatPromptMessage>>(emptyList())
         val firstSnapshot = CountDownLatch(1)
@@ -290,6 +374,7 @@ class LocalChatControllerTest {
                 while (isStillAllowed()) Thread.sleep(POLL_MILLIS)
                 return Result.failure(IllegalStateException("cancelled"))
             }
+            generationFailure?.let { return Result.failure(it) }
             onTextSnapshot("final answer")
             return Result.success(
                 LocalChatGenerationResult(

@@ -1,8 +1,20 @@
 package com.mhk2340.agent
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.Application
+import android.app.ApplicationExitInfo
+import android.os.Build
 import android.os.Bundle
+import diagnostics.AndroidDiagnosticsPersistence
+import diagnostics.DiagnosticCode
+import diagnostics.DiagnosticComponent
+import diagnostics.DiagnosticField
+import diagnostics.DiagnosticFieldKey
+import diagnostics.DiagnosticLevel
+import diagnostics.PreviousProcessCrashKind
+import diagnostics.DiagnosticsLog
+import java.io.File
 import inference.HardwareBenchmarkDependenciesOwner
 import inference.BenchmarkStarvationMonitorDependencies
 import inference.HardwareBenchmarkWorkerDependencies
@@ -13,8 +25,27 @@ import runtime.di.AgentContainer
 
 /** Runs GEN-INIT-1 and opens the shared Room database from Android's Application lifecycle. */
 class AgentApplication : Application(), HardwareBenchmarkDependenciesOwner {
-    val agentContainer: AgentContainer by lazy { AgentContainer(applicationContext = this) }
+    val diagnosticsLog: DiagnosticsLog by lazy {
+        DiagnosticsLog(
+            persistence = if (BuildConfig.DEBUG) {
+                AndroidDiagnosticsPersistence(File(noBackupFilesDir, "diagnostics"))
+            } else {
+                null
+            }
+        )
+    }
+    val agentContainer: AgentContainer by lazy {
+        AgentContainer(applicationContext = this, diagnostics = diagnosticsLog)
+    }
     private var startedActivityCount = 0
+    @Volatile
+    private var previousProcessCrashed = false
+
+    fun hasCrashNotice(): Boolean = previousProcessCrashed
+
+    fun clearCrashNotice() {
+        previousProcessCrashed = false
+    }
 
     override val hardwareBenchmarkWorkerDependencies: HardwareBenchmarkWorkerDependencies
         get() = agentContainer.hardwareBenchmarkWorkerDependencies
@@ -25,13 +56,74 @@ class AgentApplication : Application(), HardwareBenchmarkDependenciesOwner {
     lateinit var initializationResults: List<AppInitializer.InitStepResult>
         private set
 
+    private fun didPreviousProcessCrash(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return BuildConfig.DEBUG && diagnosticsLog.hasCrashEvent()
+        }
+        val exit = getSystemService(ActivityManager::class.java)
+            ?.getHistoricalProcessExitReasons(packageName, 0, 8)
+            ?.maxByOrNull { it.timestamp }
+            ?: return false
+        return exit.reason == ApplicationExitInfo.REASON_CRASH ||
+            exit.reason == ApplicationExitInfo.REASON_CRASH_NATIVE
+    }
+
+    private fun previousProcessCrashKind(): PreviousProcessCrashKind {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return PreviousProcessCrashKind.JAVA
+        val exit = getSystemService(ActivityManager::class.java)
+            ?.getHistoricalProcessExitReasons(packageName, 0, 8)
+            ?.maxByOrNull { it.timestamp }
+        return if (exit?.reason == ApplicationExitInfo.REASON_CRASH_NATIVE) {
+            PreviousProcessCrashKind.NATIVE
+        } else {
+            PreviousProcessCrashKind.JAVA
+        }
+    }
+
+    private fun installUncaughtExceptionHandler() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, exception ->
+            runCatching { diagnosticsLog.recordUncaughtException(exception) }
+            if (previous != null) {
+                previous.uncaughtException(thread, exception)
+            } else {
+                android.os.Process.killProcess(android.os.Process.myPid())
+                kotlin.system.exitProcess(10)
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
+        previousProcessCrashed = didPreviousProcessCrash()
+        if (previousProcessCrashed && !diagnosticsLog.hasCrashEvent()) {
+            val kind = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                previousProcessCrashKind()
+            } else {
+                PreviousProcessCrashKind.JAVA
+            }
+            diagnosticsLog.record(
+                DiagnosticLevel.WARNING,
+                DiagnosticComponent.APP,
+                DiagnosticCode.PREVIOUS_PROCESS_CRASH,
+                DiagnosticField.enum(DiagnosticFieldKey.PHASE, kind)
+            )
+        }
+        diagnosticsLog.record(DiagnosticLevel.INFO, DiagnosticComponent.APP, DiagnosticCode.APP_STARTED)
+        installUncaughtExceptionHandler()
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityStarted(activity: Activity) {
                 startedActivityCount++
                 if (startedActivityCount == 1) {
                     runCatching { agentContainer.appLockManager.onAppMovedToForeground() }
+                    val unlocked = runCatching { agentContainer.appLockManager.isAppUnlocked() }.getOrDefault(false)
+                    diagnosticsLog.record(
+                        DiagnosticLevel.INFO,
+                        DiagnosticComponent.APP_LOCK,
+                        DiagnosticCode.APP_LOCK_STATE,
+                        DiagnosticField.flag(DiagnosticFieldKey.SUCCESS, unlocked),
+                        DiagnosticField.enum(DiagnosticFieldKey.PHASE, diagnostics.DiagnosticLifecycleState.FOREGROUND)
+                    )
                 }
             }
 
@@ -39,6 +131,14 @@ class AgentApplication : Application(), HardwareBenchmarkDependenciesOwner {
                 if (startedActivityCount > 0) startedActivityCount--
                 if (startedActivityCount == 0) {
                     runCatching { agentContainer.appLockManager.onAppMovedToBackground() }
+                    val unlocked = runCatching { agentContainer.appLockManager.isAppUnlocked() }.getOrDefault(false)
+                    diagnosticsLog.record(
+                        DiagnosticLevel.INFO,
+                        DiagnosticComponent.APP_LOCK,
+                        DiagnosticCode.APP_LOCK_STATE,
+                        DiagnosticField.flag(DiagnosticFieldKey.SUCCESS, unlocked),
+                        DiagnosticField.enum(DiagnosticFieldKey.PHASE, diagnostics.DiagnosticLifecycleState.BACKGROUND)
+                    )
                 }
             }
 

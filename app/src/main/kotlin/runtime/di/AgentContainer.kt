@@ -5,6 +5,7 @@ import chat.DispatcherLocalChatInference
 import chat.EncryptedLocalChatHistoryStore
 import chat.LocalChatController
 import chat.LocalChatPayloadCipher
+import diagnostics.DiagnosticsLog
 import inference.AndroidContinuousDeviceIdleGate
 import inference.AndroidDeviceConditionSnapshotProvider
 import inference.AndroidDeviceFingerprintProvider
@@ -24,6 +25,7 @@ import inference.InferenceDelegateExecutor
 import inference.InferenceDelegateOutput
 import inference.DedicatedCpuInferenceDispatcher
 import inference.LlamaCppInferenceBackend
+import inference.JniLlamaBridge
 import inference.LocalInferenceEngine
 import inference.LocalModelSelfTestCancellation
 import inference.LocalModelSelfTestSession
@@ -100,7 +102,8 @@ class AgentContainer(
     private val keystoreKeyProviderOverride: KeystoreKeyProvider? = null,
     private val securityEpochStoreOverride: SecurityEpochStore? = null,
     private val panicResetLockdownStoreOverride: PanicResetLockdownStore? = null,
-    private val benchmarkWorkCancellerOverride: PanicResetBenchmarkWorkCanceller? = null
+    private val benchmarkWorkCancellerOverride: PanicResetBenchmarkWorkCanceller? = null,
+    val diagnostics: DiagnosticsLog = DiagnosticsLog()
 ) : SecurityUiActions {
     private val hardwareProfileLoadScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val benchmarkSchedulingLock = Any()
@@ -165,7 +168,11 @@ class AgentContainer(
 
     private val localCpuInferenceDispatcher: DedicatedCpuInferenceDispatcher by lazy {
         DedicatedCpuInferenceDispatcher(
-            backend = LlamaCppInferenceBackend(localModelAssetStore, localInferenceBudgetPolicy.maxContextTokens),
+            backend = LlamaCppInferenceBackend(
+                localModelAssetStore,
+                localInferenceBudgetPolicy.maxContextTokens,
+                diagnostics = diagnostics
+            ),
             reportGenericFallback = { message -> AgentLogger.w("LocalInference", message) }
         )
     }
@@ -181,7 +188,8 @@ class AgentContainer(
                 override fun encrypt(plainText: ByteArray): ByteArray = payloadCipher.encryptBytes(plainText)
                 override fun decrypt(cipherText: ByteArray): ByteArray = payloadCipher.decryptBytes(cipherText)
             },
-            isAccessAllowed = ::isLocalInferenceAllowed
+            isAccessAllowed = ::isLocalInferenceAllowed,
+            diagnostics = diagnostics
         )
     }
     internal val localChatHistoryStore get() = localChatHistoryStoreLazy.value
@@ -191,16 +199,30 @@ class AgentContainer(
             historyStore = localChatHistoryStore,
             inference = DispatcherLocalChatInference(localCpuInferenceDispatcher),
             isAccessAllowed = ::isLocalInferenceAllowed,
+            diagnostics = diagnostics,
             isModelInstalled = { localModelAssetStore.isInstalled() }
         )
     }
     internal val localChatController: LocalChatController get() = localChatControllerLazy.value
 
+    fun isVerifiedModelAvailable(): Boolean = runCatching { localModelAssetStore.isInstalled() }.getOrDefault(false)
+
+    fun isModelLoaded(): Boolean = runCatching { localCpuInferenceDispatcher.isModelLoaded() }.getOrDefault(false)
+
+    fun isNativeInferenceAvailable(): Boolean = JniLlamaBridge.libraryLoadFailure() == null
+
+    internal fun nativeInferenceLoadFailure(): Throwable? = JniLlamaBridge.libraryLoadFailure()
+
+    internal fun isLocalChatHistoryEphemeral(): Boolean =
+        localChatControllerLazy.isInitialized() && localChatControllerLazy.value.state().isHistoryEphemeral
+
     private fun purgeLocalChatHistoryForPanicReset(): Boolean {
         if (localChatControllerLazy.isInitialized()) {
             localChatControllerLazy.value.wipeForPanicReset()
         }
-        return localChatHistoryStoreLazy.value.clear().isSuccess
+        val historyCleared = localChatHistoryStoreLazy.value.clear().isSuccess
+        diagnostics.clear()
+        return historyCleared
     }
 
     /** Production inference is bound to the source-built CPU-only JNI backend; GPU delegates are rejected. */
@@ -380,7 +402,8 @@ class AgentContainer(
             phaseXVIHooks = panicResetPhaseXVIHooks,
             benchmarkWorkCanceller = panicResetBenchmarkWorkCanceller,
             configStoreResetHook = configStoreResetHook,
-            appLockManager = appLockManager
+            appLockManager = appLockManager,
+            diagnostics = diagnostics
         )
     }
 
@@ -535,11 +558,16 @@ class AgentContainer(
     /** Internal mechanics retained for production wiring tests; user entry must use requestPanicReset. */
     internal fun executePanicReset(reason: String): Long = synchronized(benchmarkSchedulingLock) {
         try {
-            operatingModeManager.transitionTo(OperatingMode.SECURITY_LOCKDOWN, "Panic Reset initiated")
-        } catch (_: Exception) {
-            // The enforcer will still latch and lock in-process before attempting any cleanup.
+            try {
+                operatingModeManager.transitionTo(OperatingMode.SECURITY_LOCKDOWN, "Panic Reset initiated")
+            } catch (_: Exception) {
+                // The enforcer will still latch and lock in-process before attempting any cleanup.
+            }
+            securityLockdownEnforcer.executePanicReset(reason)
+        } finally {
+            // The stages are recorded while reset is running, then the whole diagnostics store is purged.
+            runCatching { diagnostics.clear() }
         }
-        securityLockdownEnforcer.executePanicReset(reason)
     }
 
     /** New high-risk requests must bind their idempotency UUID to the currently persisted epoch. */

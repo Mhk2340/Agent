@@ -26,6 +26,7 @@ import android.widget.Toast
 import chat.LightweightMarkdown
 import chat.LocalChatConversation
 import chat.LocalChatController
+import diagnostics.DiagnosticCode
 import chat.LocalChatError
 import chat.LocalChatGenerationPhase
 import chat.LocalChatMessage
@@ -46,6 +47,7 @@ class LocalChatActivity : Activity() {
     private lateinit var statusView: TextView
     private lateinit var errorView: TextView
     private lateinit var contextNoteView: TextView
+    private lateinit var historyWarningView: TextView
     private lateinit var welcomeTitle: TextView
     private lateinit var welcomeDetail: TextView
     private var stateSubscription: Closeable? = null
@@ -75,6 +77,7 @@ class LocalChatActivity : Activity() {
         statusView = findViewById(R.id.local_chat_status)
         errorView = findViewById(R.id.local_chat_error)
         contextNoteView = findViewById(R.id.local_chat_context_note)
+        historyWarningView = findViewById(R.id.local_chat_history_warning)
         welcomeTitle = findViewById(R.id.local_chat_welcome)
         welcomeDetail = findViewById(R.id.local_chat_welcome_detail)
         input.isSaveEnabled = false
@@ -195,8 +198,16 @@ class LocalChatActivity : Activity() {
         currentState = state
         renderMessages(state.activeConversation)
         contextNoteView.visibility = if (state.olderContextTrimmed) View.VISIBLE else View.GONE
+        val storageClass = state.historyExceptionClass?.simpleName
+            ?.let { getString(R.string.diagnostics_failure_class, it) }.orEmpty()
+        historyWarningView.text = getString(
+            R.string.local_chat_history_ephemeral,
+            state.historyDiagnosticCode?.wireCode ?: DiagnosticCode.CHAT_STORE_FALLBACK.wireCode,
+            storageClass
+        )
+        historyWarningView.visibility = if (state.isHistoryEphemeral) View.VISIBLE else View.GONE
         renderStatus(state)
-        renderError(state.error, state.promptTokenCount)
+        renderError(state.error, state.promptTokenCount, state.historyDiagnosticCode, state.historyExceptionClass)
         updateSendButton(state)
         if (autoScrollEnabled) {
             scrollView.post { jumpToBottom() }
@@ -268,6 +279,7 @@ class LocalChatActivity : Activity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { gravity = Gravity.END })
+            if (message.status == LocalChatMessageStatus.FAILED) root.addView(failedRetryLabel())
             return RenderedMessage(message, root)
         }
 
@@ -278,10 +290,10 @@ class LocalChatActivity : Activity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
         }
-        renderMarkdownInto(contentHost, message.content)
+        renderMarkdownInto(contentHost, message.content, allowCopyActions = message.status == LocalChatMessageStatus.COMPLETE)
         root.addView(contentHost)
 
-        if (message.status != LocalChatMessageStatus.GENERATING) {
+        if (message.status == LocalChatMessageStatus.COMPLETE) {
             val actions = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.START
@@ -297,13 +309,13 @@ class LocalChatActivity : Activity() {
                 }
             })
             root.addView(actions)
-        } else if (message.content.isNotEmpty()) {
-            root.alpha = 1f
+        } else if (message.status == LocalChatMessageStatus.FAILED) {
+            root.addView(failedRetryLabel())
         }
         return RenderedMessage(message, root)
     }
 
-    private fun renderMarkdownInto(host: LinearLayout, source: String) {
+    private fun renderMarkdownInto(host: LinearLayout, source: String, allowCopyActions: Boolean) {
         host.removeAllViews()
         LightweightMarkdown.parse(source).forEach { block ->
             when (block) {
@@ -333,12 +345,12 @@ class LocalChatActivity : Activity() {
                     }
                     host.addView(text)
                 }
-                is LocalMarkdownBlock.Code -> host.addView(codeBlockView(block))
+                is LocalMarkdownBlock.Code -> host.addView(codeBlockView(block, allowCopyActions))
             }
         }
     }
 
-    private fun codeBlockView(block: LocalMarkdownBlock.Code): View = LinearLayout(this).apply {
+    private fun codeBlockView(block: LocalMarkdownBlock.Code, allowCopyActions: Boolean): View = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         background = roundedBackground(getColor(R.color.agent_surface), dp(8).toFloat())
         setPadding(dp(10), dp(6), dp(10), dp(8))
@@ -355,9 +367,11 @@ class LocalChatActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         header.addView(language)
-        header.addView(smallActionButton(R.string.local_chat_copy_code) {
-            copyToClipboard(block.text)
-        })
+        if (allowCopyActions) {
+            header.addView(smallActionButton(R.string.local_chat_copy_code) {
+                copyToClipboard(block.text)
+            })
+        }
         addView(header)
         val code = TextView(this@LocalChatActivity).apply {
             text = block.text
@@ -412,12 +426,23 @@ class LocalChatActivity : Activity() {
         statusView.visibility = if (statusText.isBlank()) View.GONE else View.VISIBLE
     }
 
-    private fun renderError(error: LocalChatError?, promptTokenCount: Int?) {
+    private fun renderError(
+        error: LocalChatError?,
+        promptTokenCount: Int?,
+        storageCode: DiagnosticCode?,
+        storageException: Class<out Throwable>?
+    ) {
+        val exceptionSuffix = storageException?.simpleName
+            ?.let { getString(R.string.diagnostics_failure_class, it) }.orEmpty()
         val message = when (error) {
             null, LocalChatError.CANCELLED -> ""
             LocalChatError.APP_LOCKED -> getString(R.string.local_chat_error_locked)
             LocalChatError.MODEL_NOT_INSTALLED -> getString(R.string.local_chat_error_model_missing)
-            LocalChatError.HISTORY_UNAVAILABLE -> getString(R.string.local_chat_error_history)
+            LocalChatError.HISTORY_UNAVAILABLE -> getString(
+                R.string.local_chat_error_history_reason,
+                storageCode?.wireCode ?: DiagnosticCode.CHAT_STORE_WRITE_FAILURE.wireCode,
+                exceptionSuffix
+            )
             LocalChatError.PROMPT_EXCEEDS_LIMIT -> getString(
                 R.string.local_chat_error_prompt_limit,
                 promptTokenCount ?: 0
@@ -438,6 +463,14 @@ class LocalChatActivity : Activity() {
             sendButton.setText(R.string.local_chat_send)
             sendButton.isEnabled = !state.isHistoryLoading && input.text.isNotBlank()
         }
+    }
+
+    private fun failedRetryLabel(): TextView = TextView(this).apply {
+        setText(R.string.local_chat_send_failed)
+        textSize = ACTION_TEXT_SP
+        setTextColor(getColor(R.color.agent_warning))
+        textDirection = View.TEXT_DIRECTION_FIRST_STRONG
+        setPadding(0, dp(4), 0, 0)
     }
 
     private fun smallActionButton(label: Int, action: () -> Unit): Button = Button(this).apply {

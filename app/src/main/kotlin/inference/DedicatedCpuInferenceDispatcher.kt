@@ -262,6 +262,8 @@ internal class DedicatedCpuInferenceDispatcher(
         AgentModelException(InferenceError.Unavailable(GENERIC_FAILURE_MESSAGE))
     )
 
+    fun isModelLoaded(): Boolean = backend.isModelLoaded()
+
     /** Unloads on the same worker, after any active request has aborted and reset its affinity. */
     fun unloadModel() {
         if (closed.get()) return

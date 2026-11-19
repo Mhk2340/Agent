@@ -196,4 +196,53 @@
         <item>۲ ساعت</item>
         <item>۲۴ ساعت</item>
     </string-array>
+    <string name="local_chat_error_history_reason">ذخیرهٔ رمزگذاری‌شدهٔ تاریخچه شکست خورد (%1$s%2$s). پیام شما ارسال نشد.</string>
+    <string name="local_chat_history_ephemeral">تاریخچه ذخیره نمی‌شود (%1$s%2$s). این گفت‌وگو فقط موقتاً در حافظه می‌ماند و با قفل یا بسته‌شدن برنامه از دست می‌رود.</string>
+    <string name="local_chat_send_failed">ارسال ناموفق بود — این پیام را دوباره بفرستید.</string>
+    <string name="diagnostics_button">عیب‌یابی</string>
+    <string name="diagnostics_title">عیب‌یابی</string>
+    <string name="diagnostics_privacy_note">گزارش شامل prompt یا پاسخ مدل نیست. کپی‌کردن آن فقط با اقدام صریح شما انجام می‌شود.</string>
+    <string name="diagnostics_filter">فیلتر سطح</string>
+    <string name="diagnostics_copy_report">کپی گزارش</string>
+    <string name="diagnostics_clear">پاک‌کردن</string>
+    <string name="diagnostics_run_self_check">اجرای خودآزمایی</string>
+    <string name="diagnostics_report_copied">گزارش عیب‌یابی کپی شد.</string>
+    <string name="diagnostics_check_running">در حال اجرای خودآزمایی کوتاه…</string>
+    <string name="diagnostics_check_pass">موفق</string>
+    <string name="diagnostics_check_fail">ناموفق</string>
+    <string name="diagnostics_check_keystore">کلید Keystore در دسترس است</string>
+    <string name="diagnostics_check_cipher">رمزگذاری/رمزگشایی AES-GCM</string>
+    <string name="diagnostics_check_history">نوشتن/خواندن/حذف فایل تاریخچه</string>
+    <string name="diagnostics_check_model">فایل مدل تأییدشده موجود است</string>
+    <string name="diagnostics_check_native">کتابخانهٔ native بارگذاری شده است</string>
+    <string name="diagnostics_no_events">رویداد عیب‌یابی وجود ندارد.</string>
+    <string name="diagnostics_level_all">همهٔ سطح‌ها</string>
+    <string name="diagnostics_level_debug">اشکال‌زدایی</string>
+    <string name="diagnostics_level_info">اطلاعات</string>
+    <string name="diagnostics_level_warning">هشدار</string>
+    <string name="diagnostics_level_error">خطا</string>
+    <string name="diagnostics_lock_state">App Lock</string>
+    <string name="diagnostics_chat_storage">ذخیرهٔ تاریخچهٔ چت</string>
+    <string name="diagnostics_model_state">مدل</string>
+    <string name="diagnostics_model_missing">نصب نیست</string>
+    <string name="diagnostics_model_installed">نصب‌شده</string>
+    <string name="diagnostics_model_loaded">بارگذاری‌شده</string>
+    <string name="diagnostics_model_not_loaded">بارگذاری نشده</string>
+    <string name="diagnostics_saved">ذخیرهٔ رمزگذاری‌شده در دسترس</string>
+    <string name="diagnostics_memory_only">فقط موقت در حافظه — ذخیره نمی‌شود</string>
+    <string name="diagnostics_locked">قفل</string>
+    <string name="diagnostics_unlocked">باز</string>
+    <string name="diagnostics_failure_class"> (%1$s)</string>
+    <string name="diagnostics_status_native">اجرای native</string>
+    <string name="diagnostics_status_checking">در حال بررسی…</string>
+    <string name="diagnostics_native_available">در دسترس</string>
+    <string name="diagnostics_native_unavailable">در دسترس نیست</string>
+    <string name="diagnostics_crash_banner">ATOM در اجرای قبلی به‌طور غیرمنتظره متوقف شد.</string>
+    <string name="diagnostics_crash_open_report">نمایش گزارش عیب‌یابی</string>
+    <string-array name="diagnostics_level_labels">
+        <item>@string/diagnostics_level_all</item>
+        <item>@string/diagnostics_level_info</item>
+        <item>@string/diagnostics_level_warning</item>
+        <item>@string/diagnostics_level_error</item>
+    </string-array>
 </resources>

@@ -31,6 +31,30 @@
         android:textSize="14sp"
         android:visibility="gone" />
 
+    <LinearLayout
+        android:id="@+id/home_crash_banner"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:background="@drawable/security_card_background"
+        android:orientation="vertical"
+        android:padding="10dp"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/diagnostics_crash_banner"
+            android:textColor="@color/agent_warning"
+            android:textSize="13sp" />
+
+        <Button
+            android:id="@+id/home_crash_report_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/diagnostics_crash_open_report" />
+    </LinearLayout>
+
     <Button
         android:id="@+id/open_local_chat_button"
         android:layout_width="match_parent"

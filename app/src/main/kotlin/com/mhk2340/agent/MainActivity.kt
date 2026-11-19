@@ -24,6 +24,12 @@ import inference.LocalModelSelfTestOutcome
 import inference.LocalModelSelfTestProgress
 import inference.LocalModelSelfTestRunStatus
 import inference.LocalModelSelfTestRunner
+import diagnostics.DiagnosticAppLockState
+import diagnostics.DiagnosticCode
+import diagnostics.DiagnosticComponent
+import diagnostics.DiagnosticField
+import diagnostics.DiagnosticFieldKey
+import diagnostics.DiagnosticLevel
 import inference.LocalModelSelfTestTiming
 import inference.ModelAssetStore
 import runtime.RuntimeStateManager
@@ -70,6 +76,7 @@ class MainActivity : Activity() {
     private var localModelSelfTestUserCancelled = false
     private var modelImportStatusOverride: Int? = null
     private var lastRenderedState: SecurityUiState? = null
+    private var lastDiagnosticsLockState: Boolean? = null
 
     private companion object {
         // PROVISIONAL - pending GEN-PERF-1
@@ -188,6 +195,21 @@ class MainActivity : Activity() {
             cancelLocalModelSelfTest()
         }
         lastRenderedState = state
+        val app = application as AgentApplication
+        val unlocked = runCatching { app.agentContainer.appLockManager.isAppUnlocked() }.getOrDefault(false)
+        if (state !is SecurityUiState.ResetOutcome && lastDiagnosticsLockState != unlocked) {
+            app.diagnosticsLog.record(
+                DiagnosticLevel.INFO,
+                DiagnosticComponent.APP_LOCK,
+                DiagnosticCode.APP_LOCK_STATE,
+                DiagnosticField.flag(DiagnosticFieldKey.SUCCESS, unlocked),
+                DiagnosticField.enum(
+                    DiagnosticFieldKey.PHASE,
+                    if (unlocked) DiagnosticAppLockState.UNLOCKED else DiagnosticAppLockState.LOCKED
+                )
+            )
+            lastDiagnosticsLockState = unlocked
+        }
         val screen = when (state) {
             is SecurityUiState.PinSetup -> inflateScreen(R.layout.screen_pin_setup)
             is SecurityUiState.PinEntry -> inflateScreen(R.layout.screen_pin_entry)
@@ -258,6 +280,12 @@ class MainActivity : Activity() {
             if (hasLockdown) R.string.status_lockdown else R.string.status_ready
         )
         val conditionView = screen.findViewById<TextView>(R.id.home_lockdown_condition)
+        val app = application as AgentApplication
+        val crashBanner = screen.findViewById<View>(R.id.home_crash_banner)
+        crashBanner.visibility = if (app.hasCrashNotice()) View.VISIBLE else View.GONE
+        screen.findViewById<View>(R.id.home_crash_report_button).setOnClickListener {
+            startActivity(Intent(this, DiagnosticsActivity::class.java))
+        }
         if (hasLockdown) {
             conditionView.visibility = View.VISIBLE
             conditionView.text = getString(lockdownLabel(state.lockdown))
@@ -290,6 +318,9 @@ class MainActivity : Activity() {
     private fun renderSettings(screen: View, state: SecurityUiState.Settings) {
         showMessage(screen.findViewById(R.id.screen_message), state.message)
         val container = (application as AgentApplication).agentContainer
+        screen.findViewById<View>(R.id.settings_diagnostics_button).setOnClickListener {
+            startActivity(Intent(this, DiagnosticsActivity::class.java))
+        }
         if (modelImportStatusOverride == R.string.model_import_auth_required && container.appLockManager.isAppUnlocked()) {
             modelImportStatusOverride = null
         }
@@ -866,6 +897,9 @@ class MainActivity : Activity() {
     }
 
     private fun renderResetOutcome(screen: View, result: PanicResetRequestResult) {
+        if (result is PanicResetRequestResult.Completed || result is PanicResetRequestResult.Incomplete) {
+            (application as AgentApplication).clearCrashNotice()
+        }
         val title = screen.findViewById<TextView>(R.id.outcome_title)
         val details = screen.findViewById<TextView>(R.id.outcome_details)
         when (result) {

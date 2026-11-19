@@ -196,4 +196,53 @@
         <item>2 hours</item>
         <item>24 hours</item>
     </string-array>
+    <string name="local_chat_error_history_reason">Encrypted chat history failed (%1$s%2$s). Your prompt was not sent.</string>
+    <string name="local_chat_history_ephemeral">History is not saved (%1$s%2$s). This conversation exists only in temporary memory and will be lost when the app locks or closes.</string>
+    <string name="local_chat_send_failed">Send failed — retry this message.</string>
+    <string name="diagnostics_button">Diagnostics</string>
+    <string name="diagnostics_title">Diagnostics</string>
+    <string name="diagnostics_privacy_note">The report omits prompts and model responses. Copying it is an explicit action.</string>
+    <string name="diagnostics_filter">Level filter</string>
+    <string name="diagnostics_copy_report">Copy report</string>
+    <string name="diagnostics_clear">Clear</string>
+    <string name="diagnostics_run_self_check">Run self-check</string>
+    <string name="diagnostics_report_copied">Diagnostics report copied.</string>
+    <string name="diagnostics_check_running">Running short self-check…</string>
+    <string name="diagnostics_check_pass">PASS</string>
+    <string name="diagnostics_check_fail">FAIL</string>
+    <string name="diagnostics_check_keystore">Keystore key available</string>
+    <string name="diagnostics_check_cipher">AES-GCM encrypt/decrypt</string>
+    <string name="diagnostics_check_history">History file write/read/delete</string>
+    <string name="diagnostics_check_model">Verified model file present</string>
+    <string name="diagnostics_check_native">Native library loaded</string>
+    <string name="diagnostics_no_events">No diagnostic events.</string>
+    <string name="diagnostics_level_all">All levels</string>
+    <string name="diagnostics_level_debug">Debug</string>
+    <string name="diagnostics_level_info">Info</string>
+    <string name="diagnostics_level_warning">Warning</string>
+    <string name="diagnostics_level_error">Error</string>
+    <string name="diagnostics_lock_state">App Lock</string>
+    <string name="diagnostics_chat_storage">Chat history storage</string>
+    <string name="diagnostics_model_state">Model</string>
+    <string name="diagnostics_model_missing">Not installed</string>
+    <string name="diagnostics_model_installed">Installed</string>
+    <string name="diagnostics_model_loaded">Loaded</string>
+    <string name="diagnostics_model_not_loaded">Not loaded</string>
+    <string name="diagnostics_saved">Encrypted storage available</string>
+    <string name="diagnostics_memory_only">Temporary memory only — not saved</string>
+    <string name="diagnostics_locked">Locked</string>
+    <string name="diagnostics_unlocked">Unlocked</string>
+    <string name="diagnostics_failure_class"> (%1$s)</string>
+    <string name="diagnostics_status_native">Native runtime</string>
+    <string name="diagnostics_status_checking">Checking…</string>
+    <string name="diagnostics_native_available">Available</string>
+    <string name="diagnostics_native_unavailable">Unavailable</string>
+    <string name="diagnostics_crash_banner">ATOM stopped unexpectedly during its previous run.</string>
+    <string name="diagnostics_crash_open_report">View diagnostics report</string>
+    <string-array name="diagnostics_level_labels">
+        <item>@string/diagnostics_level_all</item>
+        <item>@string/diagnostics_level_info</item>
+        <item>@string/diagnostics_level_warning</item>
+        <item>@string/diagnostics_level_error</item>
+    </string-array>
 </resources>

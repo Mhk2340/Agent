@@ -4,6 +4,12 @@ import contracts.InferenceError
 import contracts.InferenceRequest
 import contracts.InferenceResponse
 import contracts.TokenUsage
+import diagnostics.DiagnosticCode
+import diagnostics.DiagnosticComponent
+import diagnostics.DiagnosticField
+import diagnostics.DiagnosticFieldKey
+import diagnostics.DiagnosticLevel
+import diagnostics.DiagnosticsLog
 import kotlinx.serialization.json.Json
 import reasoning.StructuredGrammarConstraint
 import java.io.Closeable
@@ -190,6 +196,8 @@ internal object JniLlamaBridge : LlamaNativeBridge {
         return nativeSetThreadAffinity(cpuIds)
     }
 
+    internal fun libraryLoadFailure(): Throwable? = libraryLoadFailure
+
     private fun requireLibrary() {
         libraryLoadFailure?.let { error ->
             throw IllegalStateException("The local CPU runtime is unavailable", error)
@@ -243,7 +251,8 @@ class LlamaCppInferenceBackend internal constructor(
     private val bridge: LlamaNativeBridge = JniLlamaBridge,
     private val monotonicNanos: () -> Long = System::nanoTime,
     nThreads: Int = Runtime.getRuntime().availableProcessors(),
-    nThreadsBatch: Int = nThreads
+    nThreadsBatch: Int = nThreads,
+    private val diagnostics: DiagnosticsLog? = null
 ) : Closeable {
     private val lock = ReentrantLock()
     private val nativeHandleLock = Any()
@@ -576,6 +585,8 @@ class LlamaCppInferenceBackend internal constructor(
 
     private data class LoadedModel(val handle: Long, val loadDurationNanos: Long)
 
+    internal fun isModelLoaded(): Boolean = nativeHandle != INVALID_NATIVE_HANDLE
+
     private fun ensureLoaded(modelFile: File): LoadedModel {
         val path = modelFile.absolutePath
         if (loadedModelPath != null && loadedModelPath != path) {
@@ -587,19 +598,50 @@ class LlamaCppInferenceBackend internal constructor(
         }
         if (nativeHandle == INVALID_NATIVE_HANDLE) {
             val start = monotonicNanos()
-            val loadedHandle = bridge.loadModel(
-                path,
-                contextTokens,
-                configuredNThreads,
-                configuredNThreadsBatch
-            )
-            val loadDuration = (monotonicNanos() - start).coerceAtLeast(0L)
-            check(loadedHandle != INVALID_NATIVE_HANDLE) { "llama.cpp returned an invalid model handle" }
-            synchronized(nativeHandleLock) {
-                nativeHandle = loadedHandle
-                loadedModelPath = path
+            diagnostics?.record(DiagnosticLevel.INFO, DiagnosticComponent.MODEL, DiagnosticCode.MODEL_LOAD_BEGIN)
+            try {
+                val loadedHandle = bridge.loadModel(
+                    path,
+                    contextTokens,
+                    configuredNThreads,
+                    configuredNThreadsBatch
+                )
+                val loadDuration = (monotonicNanos() - start).coerceAtLeast(0L)
+                check(loadedHandle != INVALID_NATIVE_HANDLE) { "llama.cpp returned an invalid model handle" }
+                synchronized(nativeHandleLock) {
+                    nativeHandle = loadedHandle
+                    loadedModelPath = path
+                }
+                diagnostics?.record(
+                    DiagnosticLevel.INFO,
+                    DiagnosticComponent.MODEL,
+                    DiagnosticCode.MODEL_LOAD_FINISHED,
+                    DiagnosticField.flag(DiagnosticFieldKey.SUCCESS, true),
+                    DiagnosticField.number(DiagnosticFieldKey.DURATION_MS, TimeUnit.NANOSECONDS.toMillis(loadDuration))
+                )
+                return LoadedModel(loadedHandle, loadDuration)
+            } catch (failure: Throwable) {
+                if (failure is LinkageError || failure.cause is LinkageError) {
+                    diagnostics?.recordFailure(
+                        DiagnosticLevel.ERROR,
+                        DiagnosticComponent.NATIVE,
+                        DiagnosticCode.NATIVE_LOAD_FAILED,
+                        failure
+                    )
+                }
+                diagnostics?.recordFailure(
+                    DiagnosticLevel.ERROR,
+                    DiagnosticComponent.MODEL,
+                    DiagnosticCode.MODEL_LOAD_FAILED,
+                    failure,
+                    DiagnosticField.flag(DiagnosticFieldKey.SUCCESS, false),
+                    DiagnosticField.number(
+                        DiagnosticFieldKey.DURATION_MS,
+                        TimeUnit.NANOSECONDS.toMillis((monotonicNanos() - start).coerceAtLeast(0L))
+                    )
+                )
+                throw failure
             }
-            return LoadedModel(loadedHandle, loadDuration)
         }
         return LoadedModel(nativeHandle, 0L)
     }

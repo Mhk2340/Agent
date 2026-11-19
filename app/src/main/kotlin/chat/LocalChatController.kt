@@ -1,5 +1,11 @@
 package chat
 
+import diagnostics.DiagnosticCode
+import diagnostics.DiagnosticComponent
+import diagnostics.DiagnosticField
+import diagnostics.DiagnosticFieldKey
+import diagnostics.DiagnosticLevel
+import diagnostics.DiagnosticsLog
 import inference.AgentModelException
 import contracts.InferenceError
 import java.io.Closeable
@@ -9,6 +15,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 internal data class LocalChatGenerationResult(
@@ -50,10 +57,13 @@ internal class LocalChatController(
     private val inference: LocalChatInference,
     private val isAccessAllowed: () -> Boolean,
     private val isModelInstalled: () -> Boolean,
+    private val diagnostics: DiagnosticsLog? = null,
     private val clock: () -> Long = System::currentTimeMillis,
     private val newId: () -> String = { UUID.randomUUID().toString() }
 ) : Closeable {
     private val stateLock = Any()
+    private val persistentHistoryStore = historyStore
+    private val memoryOnlyHistoryStore = InMemoryLocalChatHistoryStore()
     private val listeners = CopyOnWriteArrayList<(LocalChatUiState) -> Unit>()
     private val operationExecutor: ExecutorService = Executors.newSingleThreadExecutor { task ->
         Thread(task, CHAT_CONTROLLER_THREAD_NAME).apply { isDaemon = true }
@@ -63,11 +73,18 @@ internal class LocalChatController(
     private val activeAssistantMessageId = AtomicReference<String?>(null)
     private val pendingTextSnapshot = AtomicReference<String?>(null)
     private val firstStreamSnapshotSeen = AtomicBoolean(false)
+    private val activeGenerationStartedNanos = AtomicLong(0L)
 
     @Volatile
     private var currentState = LocalChatUiState()
     @Volatile
     private var archive = LocalChatArchive()
+    @Volatile
+    private var usingMemoryOnlyHistory = false
+    @Volatile
+    private var historyFailureCode: DiagnosticCode? = null
+    @Volatile
+    private var historyFailureClass: Class<out Throwable>? = null
     @Volatile
     private var currentDraft = ""
     @Volatile
@@ -115,22 +132,34 @@ internal class LocalChatController(
                         onAccessLost()
                         return@execute
                     }
-                    val loaded = historyStore.read().getOrElse {
-                        publish(currentState.copy(
-                            isHistoryLoading = false,
-                            error = if (!isAllowed()) LocalChatError.APP_LOCKED else LocalChatError.HISTORY_UNAVAILABLE
-                        ))
-                        return@execute
+                    val loadedResult = if (usingMemoryOnlyHistory) {
+                        memoryOnlyHistoryStore.read()
+                    } else {
+                        try {
+                            persistentHistoryStore.read()
+                        } catch (failure: Exception) {
+                            Result.failure(failure)
+                        }
+                    }
+                    val loaded = if (loadedResult.isSuccess) {
+                        loadedResult.getOrThrow()
+                    } else {
+                        val failure = loadedResult.exceptionOrNull() ?: ChatHistoryStorageException()
+                        if (!isAllowed()) {
+                            publish(LocalChatUiState(error = LocalChatError.APP_LOCKED))
+                            return@execute
+                        }
+                        if (!usingMemoryOnlyHistory) {
+                            activateMemoryOnly(LocalChatArchive(), failure, DiagnosticCode.CHAT_STORE_READ_FAILURE)
+                        }
+                        memoryOnlyHistoryStore.read().getOrDefault(LocalChatArchive())
                     }
                     val now = clock()
                     val active = loaded.conversations.firstOrNull { it.id == loaded.activeConversationId }
                         ?: loaded.conversations.maxByOrNull(LocalChatConversation::updatedAtEpochMs)
                     val normalizedArchive = if (active == null) {
                         val first = newConversation(now)
-                        LocalChatArchive(
-                            activeConversationId = first.id,
-                            conversations = listOf(first)
-                        )
+                        LocalChatArchive(activeConversationId = first.id, conversations = listOf(first))
                     } else {
                         loaded.copy(activeConversationId = active.id)
                     }
@@ -147,9 +176,19 @@ internal class LocalChatController(
                             !isAllowed() -> LocalChatError.APP_LOCKED
                             !hasInstalledModel() -> LocalChatError.MODEL_NOT_INSTALLED
                             else -> null
-                        }
+                        },
+                        isHistoryEphemeral = usingMemoryOnlyHistory,
+                        historyDiagnosticCode = historyFailureCode,
+                        historyExceptionClass = historyFailureClass
                     ))
-                    if (loaded != normalizedArchive && isAllowed()) persistArchive()
+                    if (loaded != normalizedArchive && isAllowed()) {
+                        persistArchive()
+                        publish(currentState.copy(
+                            isHistoryEphemeral = usingMemoryOnlyHistory,
+                            historyDiagnosticCode = historyFailureCode,
+                            historyExceptionClass = historyFailureClass
+                        ))
+                    }
                 } finally {
                     opening.set(false)
                 }
@@ -177,7 +216,10 @@ internal class LocalChatController(
             currentState = LocalChatUiState(
                 activeConversation = created,
                 savedConversationCount = updated.conversations.size,
-                error = if (hasInstalledModel()) null else LocalChatError.MODEL_NOT_INSTALLED
+                error = if (hasInstalledModel()) null else LocalChatError.MODEL_NOT_INSTALLED,
+                isHistoryEphemeral = usingMemoryOnlyHistory,
+                historyDiagnosticCode = historyFailureCode,
+                historyExceptionClass = historyFailureClass
             )
         }
         currentDraft = ""
@@ -275,12 +317,25 @@ internal class LocalChatController(
 
     /** Clears decrypted transcript state after lock/Panic Reset; ciphertext remains unless reset purges it. */
     fun onAccessLost() {
+        if (currentState.isGenerating) {
+            recordGenerationOutcome(
+                DiagnosticCode.CHAT_SEND_CANCELLED,
+                DiagnosticLevel.WARNING,
+                result = LocalChatError.APP_LOCKED,
+                promptTokenCount = currentState.promptTokenCount,
+                phase = currentState.phase
+            )
+        }
         activeCancellation.getAndSet(null)?.set(true)
         runCatching { inference.requestAbortGeneration() }
         pendingTextSnapshot.set(null)
         activeAssistantMessageId.set(null)
         firstStreamSnapshotSeen.set(false)
         archive = LocalChatArchive()
+        memoryOnlyHistoryStore.clear()
+        usingMemoryOnlyHistory = false
+        historyFailureCode = null
+        historyFailureClass = null
         currentDraft = ""
         opened = false
         publish(LocalChatUiState(error = LocalChatError.APP_LOCKED))
@@ -294,9 +349,13 @@ internal class LocalChatController(
         activeAssistantMessageId.set(null)
         firstStreamSnapshotSeen.set(false)
         archive = LocalChatArchive()
+        memoryOnlyHistoryStore.clear()
+        usingMemoryOnlyHistory = false
+        historyFailureCode = null
+        historyFailureClass = null
         currentDraft = ""
         opened = false
-        runCatching { historyStore.clear() }
+        runCatching { persistentHistoryStore.clear() }
         publish(LocalChatUiState(error = LocalChatError.APP_LOCKED))
     }
 
@@ -308,6 +367,13 @@ internal class LocalChatController(
 
     private fun queueGeneration(conversation: LocalChatConversation, assistantId: String) {
         val cancellation = AtomicBoolean(false)
+        activeGenerationStartedNanos.set(System.nanoTime())
+        diagnostics?.record(
+            DiagnosticLevel.INFO,
+            DiagnosticComponent.CHAT_CONTROLLER,
+            DiagnosticCode.CHAT_SEND_BEGIN,
+            DiagnosticField.enum(DiagnosticFieldKey.PHASE, LocalChatGenerationPhase.PREPARING)
+        )
         activeCancellation.set(cancellation)
         activeAssistantMessageId.set(assistantId)
         pendingTextSnapshot.set(null)
@@ -316,8 +382,8 @@ internal class LocalChatController(
             operationExecutor.execute {
                 runGeneration(conversation, assistantId, cancellation)
             }
-        } catch (_: RejectedExecutionException) {
-            completeFailure(conversation, assistantId, LocalChatError.GENERATION_FAILED, "")
+        } catch (failure: RejectedExecutionException) {
+            completeFailure(conversation, assistantId, LocalChatError.GENERATION_FAILED, "", failureCause = failure)
         }
     }
 
@@ -330,8 +396,15 @@ internal class LocalChatController(
             if (!isAllowed()) onAccessLost() else completeCancelled(conversation, assistantId, "", 0)
             return
         }
-        if (persistArchive().isFailure) {
-            completeFailure(conversation, assistantId, LocalChatError.HISTORY_UNAVAILABLE, "")
+        val initialSave = persistArchive()
+        if (initialSave.isFailure) {
+            completeFailure(
+                conversation,
+                assistantId,
+                LocalChatError.HISTORY_UNAVAILABLE,
+                "",
+                failureCause = initialSave.exceptionOrNull()
+            )
             return
         }
 
@@ -376,7 +449,8 @@ internal class LocalChatController(
                     conversation,
                     assistantId,
                     mapError(tokenCountFailure),
-                    ""
+                    "",
+                    failureCause = tokenCountFailure
                 )
                 return
             }
@@ -415,6 +489,12 @@ internal class LocalChatController(
                 if (canContinue(cancellation)) {
                     pendingTextSnapshot.set(snapshot)
                     if (snapshot.isNotEmpty() && firstStreamSnapshotSeen.compareAndSet(false, true)) {
+                        diagnostics?.record(
+                            DiagnosticLevel.DEBUG,
+                            DiagnosticComponent.CHAT_CONTROLLER,
+                            DiagnosticCode.CHAT_SEND_FIRST_TOKEN,
+                            DiagnosticField.number(DiagnosticFieldKey.DURATION_MS, generationElapsedMs())
+                        )
                         publish(currentState.copy(phase = LocalChatGenerationPhase.GENERATING))
                     }
                 }
@@ -445,7 +525,7 @@ internal class LocalChatController(
                 if (cancellation.get()) {
                     completeCancelled(conversation, assistantId, currentPartialText(), ready.removedTurns)
                 } else {
-                    completeFailure(conversation, assistantId, mapError(error), currentPartialText())
+                    completeFailure(conversation, assistantId, mapError(error), currentPartialText(), failureCause = error)
                 }
             }
         )
@@ -466,6 +546,16 @@ internal class LocalChatController(
             status = LocalChatMessageStatus.COMPLETE,
             metrics = metrics,
             olderContextTrimmed = contextTrimmed
+        )
+        recordGenerationOutcome(
+            DiagnosticCode.CHAT_SEND_FINISHED,
+            DiagnosticLevel.INFO,
+            promptTokenCount = metrics.promptTokens,
+            outputTokenCount = metrics.outputTokens,
+            firstTokenMs = metrics.timeToFirstTokenMs,
+            prefillTokensPerSecond = metrics.prefillTokensPerSecond,
+            decodeTokensPerSecond = metrics.decodeTokensPerSecond,
+            phase = currentState.phase
         )
         finish(conversation, assistant, error = null, promptTokens = metrics.promptTokens)
     }
@@ -488,6 +578,13 @@ internal class LocalChatController(
             status = LocalChatMessageStatus.CANCELLED,
             olderContextTrimmed = removedTurns > 0
         )
+        recordGenerationOutcome(
+            DiagnosticCode.CHAT_SEND_CANCELLED,
+            DiagnosticLevel.INFO,
+            result = LocalChatError.CANCELLED,
+            promptTokenCount = currentState.promptTokenCount,
+            phase = currentState.phase
+        )
         finish(conversation, assistant, error = LocalChatError.CANCELLED, promptTokens = currentState.promptTokenCount)
     }
 
@@ -496,7 +593,8 @@ internal class LocalChatController(
         assistantId: String,
         error: LocalChatError,
         partialText: String,
-        promptTokens: Int? = currentState.promptTokenCount
+        promptTokens: Int? = currentState.promptTokenCount,
+        failureCause: Throwable? = null
     ) {
         if (!isAllowed()) {
             onAccessLost()
@@ -510,6 +608,14 @@ internal class LocalChatController(
             status = LocalChatMessageStatus.FAILED,
             olderContextTrimmed = currentState.olderContextTrimmed
         )
+        recordGenerationOutcome(
+            DiagnosticCode.CHAT_SEND_FAILED,
+            if (error == LocalChatError.PROMPT_EXCEEDS_LIMIT) DiagnosticLevel.WARNING else DiagnosticLevel.ERROR,
+            result = error,
+            promptTokenCount = promptTokens,
+            failure = failureCause,
+            phase = currentState.phase
+        )
         finish(conversation, assistant, error, promptTokens)
     }
 
@@ -520,9 +626,21 @@ internal class LocalChatController(
         promptTokens: Int?
     ) {
         val latest = archive.conversations.firstOrNull { it.id == conversation.id } ?: conversation
+        val failedUserId = if (error != null && error != LocalChatError.CANCELLED) {
+            latest.messages.lastOrNull { it.role == LocalChatRole.USER }?.id
+        } else {
+            null
+        }
+        val keepAssistantMessage = assistant.status != LocalChatMessageStatus.FAILED || assistant.content.isNotEmpty()
+        val finalMessages = latest.messages
+            .filterNot { it.id == assistant.id }
+            .map { message ->
+                if (message.id == failedUserId) message.copy(status = LocalChatMessageStatus.FAILED) else message
+            }
+            .let { messages -> if (keepAssistantMessage) messages + assistant else messages }
         val updatedConversation = latest.copy(
             updatedAtEpochMs = clock(),
-            messages = latest.messages.filterNot { it.id == assistant.id } + assistant
+            messages = finalMessages
         )
         replaceConversationInArchive(updatedConversation)
         activeCancellation.set(null)
@@ -543,7 +661,10 @@ internal class LocalChatController(
             phase = LocalChatGenerationPhase.IDLE,
             promptTokenCount = promptTokens,
             error = finalError,
-            olderContextTrimmed = assistant.olderContextTrimmed
+            olderContextTrimmed = assistant.olderContextTrimmed,
+            isHistoryEphemeral = usingMemoryOnlyHistory,
+            historyDiagnosticCode = historyFailureCode,
+            historyExceptionClass = historyFailureClass
         ))
         if (!isAllowed()) onAccessLost()
     }
@@ -556,7 +677,10 @@ internal class LocalChatController(
             isGenerating = true,
             phase = LocalChatGenerationPhase.PREPARING,
             promptTokenCount = null,
-            error = null
+            error = null,
+            isHistoryEphemeral = usingMemoryOnlyHistory,
+            historyDiagnosticCode = historyFailureCode,
+            historyExceptionClass = historyFailureClass
         ))
     }
 
@@ -585,7 +709,78 @@ internal class LocalChatController(
 
     private fun persistArchive(): Result<Unit> {
         if (!isAllowed()) return Result.failure(ChatHistoryAccessException())
-        return historyStore.write(archive)
+        if (usingMemoryOnlyHistory) return memoryOnlyHistoryStore.write(archive)
+
+        val saved = try {
+            persistentHistoryStore.write(archive)
+        } catch (failure: Exception) {
+            Result.failure(failure)
+        }
+        if (saved.isSuccess) return saved
+        if (!isAllowed()) return Result.failure(ChatHistoryAccessException())
+        val failure = saved.exceptionOrNull() ?: ChatHistoryStorageException()
+        activateMemoryOnly(archive, failure, DiagnosticCode.CHAT_STORE_WRITE_FAILURE)
+        return memoryOnlyHistoryStore.write(archive)
+    }
+
+    private fun activateMemoryOnly(
+        seed: LocalChatArchive,
+        failure: Throwable,
+        fallbackCode: DiagnosticCode
+    ) {
+        val storageFailure = failure as? ChatHistoryStorageException
+        val code = storageFailure?.diagnosticCode ?: fallbackCode
+        val failureClass = storageFailure?.failureClass ?: failure.javaClass
+        memoryOnlyHistoryStore.write(seed)
+        usingMemoryOnlyHistory = true
+        historyFailureCode = code
+        historyFailureClass = failureClass
+        diagnostics?.record(
+            DiagnosticLevel.WARNING,
+            DiagnosticComponent.CHAT_STORE,
+            DiagnosticCode.CHAT_STORE_FALLBACK,
+            DiagnosticField.enum(DiagnosticFieldKey.RESULT_TYPE, code),
+            DiagnosticField.classType(DiagnosticFieldKey.EXCEPTION_TYPE, failureClass)
+        )
+        publish(currentState.copy(
+            isHistoryEphemeral = true,
+            historyDiagnosticCode = code,
+            historyExceptionClass = failureClass
+        ))
+    }
+
+    private fun generationElapsedMs(): Long =
+        ((System.nanoTime() - activeGenerationStartedNanos.get()).coerceAtLeast(0L) / 1_000_000L)
+
+    private fun recordGenerationOutcome(
+        code: DiagnosticCode,
+        level: DiagnosticLevel,
+        result: LocalChatError? = null,
+        promptTokenCount: Int? = null,
+        outputTokenCount: Int? = null,
+        firstTokenMs: Long? = null,
+        prefillTokensPerSecond: Double? = null,
+        decodeTokensPerSecond: Double? = null,
+        phase: LocalChatGenerationPhase? = null,
+        failure: Throwable? = null
+    ) {
+        val fields = mutableListOf(DiagnosticField.number(DiagnosticFieldKey.DURATION_MS, generationElapsedMs()))
+        result?.let { fields += DiagnosticField.enum(DiagnosticFieldKey.RESULT_TYPE, it) }
+        promptTokenCount?.let { fields += DiagnosticField.number(DiagnosticFieldKey.PROMPT_TOKEN_COUNT, it.toLong()) }
+        outputTokenCount?.let { fields += DiagnosticField.number(DiagnosticFieldKey.OUTPUT_TOKEN_COUNT, it.toLong()) }
+        firstTokenMs?.let { fields += DiagnosticField.number(DiagnosticFieldKey.TIME_TO_FIRST_TOKEN_MS, it) }
+        prefillTokensPerSecond?.takeIf { it.isFinite() }?.let {
+            fields += DiagnosticField.decimal(DiagnosticFieldKey.PREFILL_TOKENS_PER_SECOND, it)
+        }
+        decodeTokensPerSecond?.takeIf { it.isFinite() }?.let {
+            fields += DiagnosticField.decimal(DiagnosticFieldKey.DECODE_TOKENS_PER_SECOND, it)
+        }
+        phase?.let { fields += DiagnosticField.enum(DiagnosticFieldKey.PHASE, it) }
+        if (failure != null) {
+            diagnostics?.recordFailure(level, DiagnosticComponent.CHAT_CONTROLLER, code, failure, *fields.toTypedArray())
+        } else {
+            diagnostics?.record(level, DiagnosticComponent.CHAT_CONTROLLER, code, *fields.toTypedArray())
+        }
     }
 
     private fun enqueueArchiveSave() {
