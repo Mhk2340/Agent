@@ -512,6 +512,43 @@ Java_inference_JniLlamaBridge_nativeSystemInfo(JNIEnv * env, jobject) {
     return nullptr;
 }
 
+extern "C" JNIEXPORT jint JNICALL
+Java_inference_JniLlamaBridge_nativeCountPromptTokens(
+    JNIEnv * env,
+    jobject,
+    jlong handle,
+    jstring contextValue,
+    jstring promptValue
+) {
+    try {
+        NativeSession * session = sessionFromHandle(handle);
+        if (session == nullptr || session->model == nullptr) {
+            throw std::invalid_argument("The native model handle is invalid");
+        }
+        const std::string context = fromJavaString(env, contextValue);
+        const std::string prompt = fromJavaString(env, promptValue);
+        if (context.find('\0') != std::string::npos || prompt.find('\0') != std::string::npos) {
+            throw std::invalid_argument("Prompt text cannot contain a null character");
+        }
+
+        std::lock_guard<std::mutex> guard(session->mutex);
+        const std::string formattedPrompt = formatPrompt(session->model, context, prompt);
+        const auto promptTokens = tokenizePrompt(llama_model_get_vocab(session->model), formattedPrompt);
+        if (promptTokens.empty() ||
+            promptTokens.size() > static_cast<size_t>(std::numeric_limits<jint>::max())) {
+            throw std::runtime_error("The formatted prompt token count is unavailable");
+        }
+        return static_cast<jint>(promptTokens.size());
+    } catch (const std::bad_alloc &) {
+        throwJava(env, "java/lang/OutOfMemoryError", "The prompt token count could not be allocated");
+    } catch (const std::exception & error) {
+        throwJava(env, "java/lang/IllegalStateException", error.what());
+    } catch (...) {
+        throwJava(env, "java/lang/IllegalStateException", "Prompt token counting failed");
+    }
+    return -1;
+}
+
 extern "C" JNIEXPORT jobject JNICALL
 Java_inference_JniLlamaBridge_nativeGenerate(
     JNIEnv * env,

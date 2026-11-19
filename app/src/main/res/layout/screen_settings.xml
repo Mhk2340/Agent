@@ -146,6 +146,46 @@
         android:text="@string/local_model_self_test_button" />
 
     <TextView
+        android:id="@+id/local_model_self_test_quick_question"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:layout_marginEnd="8dp"
+        android:text="@string/local_model_self_test_order_quick"
+        android:textColor="@color/agent_secondary_text"
+        android:textSize="12sp" />
+
+    <Button
+        android:id="@+id/settings_local_model_prefill_test_button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:enabled="false"
+        android:text="@string/local_model_self_test_prefill_button" />
+
+    <Button
+        android:id="@+id/settings_local_model_sweep_test_button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:enabled="false"
+        android:text="@string/local_model_self_test_sweep_button"
+        android:visibility="gone" />
+
+    <Button
+        android:id="@+id/local_model_self_test_cancel_button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/local_model_self_test_cancel_button"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/local_model_self_test_progress"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:textColor="@color/agent_secondary_text"
+        android:visibility="gone" />
+
+    <TextView
         android:id="@+id/local_model_self_test_status"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

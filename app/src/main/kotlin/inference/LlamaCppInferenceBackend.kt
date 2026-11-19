@@ -49,6 +49,10 @@ internal interface LlamaNativeBridge {
         topP: Float,
         grammar: String?
     ): NativeGenerationResult
+
+    /** Counts the exact model-formatted prompt without generating tokens; -1 means unavailable. */
+    fun countPromptTokens(handle: Long, context: String, prompt: String): Int = -1
+
     fun releaseModel(handle: Long)
 
     /** Requests llama.cpp's CPU abort callback without waiting for the inference lock. */
@@ -97,6 +101,11 @@ internal object JniLlamaBridge : LlamaNativeBridge {
         return nativeGenerate(handle, context, prompt, maxTokens, temperature, topP, grammar)
     }
 
+    override fun countPromptTokens(handle: Long, context: String, prompt: String): Int {
+        requireLibrary()
+        return nativeCountPromptTokens(handle, context, prompt)
+    }
+
     override fun releaseModel(handle: Long) {
         requireLibrary()
         nativeReleaseModel(handle)
@@ -139,6 +148,7 @@ internal object JniLlamaBridge : LlamaNativeBridge {
         topP: Float,
         grammar: String?
     ): NativeGenerationResult
+    private external fun nativeCountPromptTokens(handle: Long, context: String, prompt: String): Int
     private external fun nativeReleaseModel(handle: Long)
     private external fun nativeCancelGeneration(handle: Long)
     private external fun nativeGetThreadAffinity(): IntArray?
@@ -302,6 +312,19 @@ class LlamaCppInferenceBackend internal constructor(
     }
 
     internal fun systemInfo(): String = bridge.systemInfo()
+
+    /** Returns the token count after the verified model chat template has been applied. */
+    internal fun formattedPromptTokenCount(context: String, prompt: String): Int? {
+        val modelFile = modelAssetStore.verifiedModelFile() ?: return null
+        return try {
+            lock.withLock {
+                val loaded = ensureLoaded(modelFile)
+                bridge.countPromptTokens(loaded.handle, context, prompt).takeIf { it > 0 }
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
 
     internal fun currentThreadAffinity(): List<Int>? = runCatching {
         bridge.currentThreadAffinity()?.toList()

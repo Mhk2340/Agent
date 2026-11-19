@@ -7,33 +7,124 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.ceil
+
+private const val QUICK_PROMPT_TOKEN_TARGET_VALUE = 41
+private const val PREFILL_PROMPT_TOKEN_TARGET_VALUE = 606
+private const val QUICK_MAX_OUTPUT_TOKENS_VALUE = 16
+private const val PREFILL_MAX_OUTPUT_TOKENS_VALUE = 4
+private const val SWEEP_MAX_OUTPUT_TOKENS_VALUE = 4
+private const val NO_REST_MS_VALUE = 0L
+private const val SWEEP_INTER_RUN_REST_MS_VALUE = 5_000L
 
 internal enum class LocalModelSelfTestConfiguration(
     val nThreads: Int,
     val isPinned: Boolean,
-    val displayName: String,
-    val isPrefill: Boolean = false
+    val displayName: String
 ) {
-    // PROVISIONAL - pending GEN-PERF-1
-    WARM_UP_B(nThreads = 2, isPinned = true, displayName = "B warm-up"),
-    // PROVISIONAL - pending GEN-PERF-1
     A(nThreads = 1, isPinned = true, displayName = "A"),
-    // PROVISIONAL - pending GEN-PERF-1
     B(nThreads = 2, isPinned = true, displayName = "B"),
-    // PROVISIONAL - pending GEN-PERF-1
-    D(nThreads = 2, isPinned = false, displayName = "D"),
-    // PROVISIONAL - pending GEN-PERF-1
-    PREFILL_B(nThreads = 2, isPinned = true, displayName = "B prefill", isPrefill = true)
+    D(nThreads = 2, isPinned = false, displayName = "D — saved baseline")
+}
+
+/** Separate, explicit test actions. QUICK is the only default action. */
+internal enum class LocalModelSelfTestMode(
+    val displayName: String,
+    val configurations: List<LocalModelSelfTestConfiguration>,
+    val targetPromptTokens: Int,
+    val maxOutputTokens: Int,
+    val interRunRestMs: Long,
+    val isPrefillOnly: Boolean
+) {
+    QUICK(
+        displayName = "Quick B",
+        configurations = listOf(LocalModelSelfTestConfiguration.B),
+        targetPromptTokens = QUICK_PROMPT_TOKEN_TARGET_VALUE,
+        maxOutputTokens = QUICK_MAX_OUTPUT_TOKENS_VALUE,
+        interRunRestMs = NO_REST_MS_VALUE,
+        isPrefillOnly = false
+    ),
+    PREFILL_606(
+        displayName = "B prefill 606",
+        configurations = listOf(LocalModelSelfTestConfiguration.B),
+        targetPromptTokens = PREFILL_PROMPT_TOKEN_TARGET_VALUE,
+        maxOutputTokens = PREFILL_MAX_OUTPUT_TOKENS_VALUE,
+        interRunRestMs = NO_REST_MS_VALUE,
+        isPrefillOnly = true
+    ),
+    /** Debug-only UI action: one A, one B, one D pass; never run as a startup/default test. */
+    SWEEP_ABD(
+        displayName = "A/B/D debug sweep",
+        configurations = listOf(
+            LocalModelSelfTestConfiguration.A,
+            LocalModelSelfTestConfiguration.B,
+            LocalModelSelfTestConfiguration.D
+        ),
+        targetPromptTokens = QUICK_PROMPT_TOKEN_TARGET_VALUE,
+        maxOutputTokens = SWEEP_MAX_OUTPUT_TOKENS_VALUE,
+        interRunRestMs = SWEEP_INTER_RUN_REST_MS_VALUE,
+        isPrefillOnly = false
+    );
+
+    val runCount: Int get() = configurations.size
+
+    fun basePrompt(): String = if (isPrefillOnly) PREFILL_BASE_PROMPT else QUICK_BASE_PROMPT
+
+    companion object {
+        const val QUICK_PROMPT_TOKEN_TARGET = QUICK_PROMPT_TOKEN_TARGET_VALUE
+        const val PREFILL_PROMPT_TOKEN_TARGET = PREFILL_PROMPT_TOKEN_TARGET_VALUE
+        const val QUICK_MAX_OUTPUT_TOKENS = QUICK_MAX_OUTPUT_TOKENS_VALUE
+        const val PREFILL_MAX_OUTPUT_TOKENS = PREFILL_MAX_OUTPUT_TOKENS_VALUE
+        const val SWEEP_MAX_OUTPUT_TOKENS = SWEEP_MAX_OUTPUT_TOKENS_VALUE
+        const val NO_REST_MS = NO_REST_MS_VALUE
+        const val SWEEP_INTER_RUN_REST_MS = SWEEP_INTER_RUN_REST_MS_VALUE
+
+        const val PREFILL_SENTENCE =
+            "Please reply with one short harmless greeting. This is a fixed CPU prefill check using only neutral sample text and no user data."
+        const val PREFILL_SENTENCE_REPETITIONS = 22
+        val PREFILL_BASE_PROMPT: String =
+            List(PREFILL_SENTENCE_REPETITIONS) { PREFILL_SENTENCE }.joinToString(" ")
+
+        const val QUICK_BASE_PROMPT = "Say hello in a few words."
+    }
+}
+
+/** Planning budgets, deliberately conservative and not device performance claims. */
+internal object LocalModelSelfTestTiming {
+    const val TIMEOUT_MS = 180_000L
+    // Planning allowance from beginning a run to its first token; includes loading/token-count setup.
+    // It is not the native TTFT metric, which is reported separately.
+    const val EXPECTED_FIRST_TOKEN_WALL_BUDGET_MS = 30_000L
+    // Conservative end of the user's observed decode range; only used for the estimate below.
+    const val EXPECTED_DECODE_TOKENS_PER_SECOND = 1.1
+
+    fun expectedDecodeBudgetMs(mode: LocalModelSelfTestMode): Long {
+        val decodeTokens = (mode.maxOutputTokens - 1).coerceAtLeast(0)
+        return ceil(decodeTokens * MILLIS_PER_SECOND / EXPECTED_DECODE_TOKENS_PER_SECOND).toLong()
+    }
+
+    fun expectedDurationMs(mode: LocalModelSelfTestMode): Long {
+        val perRunBudgetMs = EXPECTED_FIRST_TOKEN_WALL_BUDGET_MS +
+            expectedDecodeBudgetMs(mode) + mode.interRunRestMs
+        // Use N * rest (rather than N-1) as the conservative report formula requested.
+        return mode.runCount.toLong() * perRunBudgetMs
+    }
+
+    private const val MILLIS_PER_SECOND = 1_000.0
 }
 
 internal enum class LocalModelSelfTestRunStatus(val displayLabel: String) {
-    PINNED("pinned"),
-    UNPINNED("unpinned"),
+    PINNED("pinned; readback verified"),
+    BASELINE_UNPINNED("saved baseline; no explicit pin"),
     PIN_FAILED("pin failed"),
-    UNPIN_FAILED("unpin failed"),
+    UNPIN_FAILED("affinity restore failed"),
     CPU_FREQUENCY_UNAVAILABLE("CPU frequency unavailable"),
     NOT_ENOUGH_STRONG_CORES("not enough strong CPU cores"),
-    AFFINITY_UNAVAILABLE("affinity unavailable")
+    AFFINITY_UNAVAILABLE("affinity unavailable"),
+    PROMPT_TOKEN_TARGET_UNAVAILABLE("could not form exact prompt-token target"),
+    PROMPT_TOKEN_TARGET_MISMATCH("prompt-token target mismatch"),
+    INVALID_METRICS("invalid inference metrics"),
+    INFERENCE_FAILED("inference failed")
 }
 
 /** Each entry is one sample; generated text and cross-run aggregates are intentionally omitted. */
@@ -51,16 +142,26 @@ internal data class LocalModelSelfTestCaseMetrics(
     val status: LocalModelSelfTestRunStatus
 )
 
-/** The final library system_info string is shown after the complete self-test. */
+/** The final library system_info string is shown after the selected test action. */
 internal data class LocalModelSelfTestMetrics(
+    val mode: LocalModelSelfTestMode,
     val cases: List<LocalModelSelfTestCaseMetrics>,
     val systemInfo: String
+)
+
+internal data class LocalModelSelfTestProgress(
+    val mode: LocalModelSelfTestMode,
+    val runNumber: Int,
+    val totalRuns: Int,
+    val configuration: LocalModelSelfTestConfiguration
 )
 
 internal sealed class LocalModelSelfTestOutcome {
     data class Success(val metrics: LocalModelSelfTestMetrics) : LocalModelSelfTestOutcome()
     data class PartialFailure(val metrics: LocalModelSelfTestMetrics) : LocalModelSelfTestOutcome()
     object Failure : LocalModelSelfTestOutcome()
+    object Cancelled : LocalModelSelfTestOutcome()
+    object TimedOut : LocalModelSelfTestOutcome()
 }
 
 /** Cancellation is shared by UI lifecycle guards, the timeout, the runner, and the CPU bridge. */
@@ -90,7 +191,6 @@ internal class LocalModelSelfTestCancellation {
     }
 
     private companion object {
-        // PROVISIONAL - pending GEN-PERF-1
         const val CANCELLATION_SIGNAL_COUNT = 1
     }
 }
@@ -112,6 +212,10 @@ internal class LocalModelSelfTestSession(
     fun configureThreadCounts(nThreads: Int, nThreadsBatch: Int) =
         backend.configureThreadCounts(nThreads, nThreadsBatch)
 
+    /** Uses the pinned model's chat template and tokenizer; it does no model generation. */
+    fun formattedPromptTokenCount(context: String, prompt: String): Int? =
+        backend.formattedPromptTokenCount(context, prompt)
+
     fun requestAbort() {
         backend.requestAbortGeneration()
     }
@@ -122,24 +226,30 @@ internal class LocalModelSelfTestSession(
     }
 }
 
-/** Runs the visible B warm-up, interleaved A/B/D sweep, and two fixed B prefill samples. */
+/** Runs exactly the selected plan: one quick B run by default, or a separate prefill/debug action. */
 internal class LocalModelSelfTestRunner(
     private val sessionFactory: (LocalModelSelfTestCancellation, Int) -> LocalModelSelfTestSession,
     private val isEligible: () -> Boolean,
     private val strongCoreIdsProvider: () -> List<Int>? = {
         CpuMaxFrequencyReader().readStrongCoreIds()
     },
-    private val waitBetweenRuns: (LocalModelSelfTestCancellation) -> Boolean = { cancellation ->
-        !cancellation.awaitCancellation(COOLDOWN_MILLIS, TimeUnit.MILLISECONDS)
+    private val waitBetweenRuns: (LocalModelSelfTestCancellation, Long) -> Boolean = { cancellation, restMs ->
+        restMs <= 0L || !cancellation.awaitCancellation(restMs, TimeUnit.MILLISECONDS)
     }
 ) {
-    fun run(cancellation: LocalModelSelfTestCancellation): LocalModelSelfTestOutcome {
+    fun run(
+        cancellation: LocalModelSelfTestCancellation,
+        mode: LocalModelSelfTestMode = LocalModelSelfTestMode.QUICK,
+        onProgress: (LocalModelSelfTestProgress) -> Unit = {}
+    ): LocalModelSelfTestOutcome {
         if (!canContinue(cancellation)) return LocalModelSelfTestOutcome.Failure
 
         val caseMetrics = mutableListOf<LocalModelSelfTestCaseMetrics>()
         var lastSession: LocalModelSelfTestSession? = null
         var baselineCaptured = false
         var originalAffinity: List<Int>? = null
+        var anyRunFailed = false
+
         try {
             val strongCoreIds = runCatching(strongCoreIdsProvider)
                 .getOrNull()
@@ -147,83 +257,156 @@ internal class LocalModelSelfTestRunner(
                 ?.sorted()
                 ?.takeIf { it.isNotEmpty() }
 
-            for ((index, configuration) in EXECUTION_PLAN.withIndex()) {
+            for ((index, configuration) in mode.configurations.withIndex()) {
                 if (!canContinue(cancellation)) return LocalModelSelfTestOutcome.Failure
+                runCatching {
+                    onProgress(
+                        LocalModelSelfTestProgress(
+                            mode = mode,
+                            runNumber = index.inc(),
+                            totalRuns = mode.runCount,
+                            configuration = configuration
+                        )
+                    )
+                }
 
                 var session: LocalModelSelfTestSession? = null
+                var affinityBeforeRun: List<Int>? = null
+                var affinityDuringRun: List<Int>? = null
+                var affinityAfterRun: List<Int>? = null
+                var nThreads = configuration.nThreads
+                var promptTokens: Int? = null
+                var firstTokenTimeMs: Long? = null
+                var prefillRate: Double? = null
+                var decodeRate: Double? = null
+                var status = LocalModelSelfTestRunStatus.INFERENCE_FAILED
+                var issue = false
+                var fatalIssue = false
                 var generated = false
                 var affinityRestored = true
-                var affinitySetupFailed = false
-                var affinityBeforeRun: List<Int>? = null
-                var affinityAfterRun: List<Int>? = null
+
                 try {
                     session = sessionFactory(cancellation, configuration.nThreads)
                     lastSession = session
                     cancellation.attachAbortHandler(session::requestAbort)
                     if (!canContinue(cancellation)) return LocalModelSelfTestOutcome.Failure
 
-                    // Capture once, on this runner's dedicated worker, before the warm-up begins.
+                    // Capture the worker's original mask once, before any explicit pin is applied.
                     if (!baselineCaptured) {
                         baselineCaptured = true
                         originalAffinity = readAllowedCores(session)
                     }
                     affinityBeforeRun = readAllowedCores(session)
-                    val prepared = prepareRun(session, configuration, originalAffinity, strongCoreIds)
+
+                    val prepared = prepareRun(
+                        session = session,
+                        configuration = configuration,
+                        baseline = originalAffinity,
+                        strongCoreIds = strongCoreIds
+                    )
                     if (prepared == null) {
-                        affinitySetupFailed = true
-                        caseMetrics += failedAffinityCase(
-                            configuration = configuration,
-                            runNumber = index.inc(),
-                            affinityBeforeCoreIds = affinityBeforeRun,
-                            allowedCoreIds = readAllowedCores(session)
-                        )
+                        status = LocalModelSelfTestRunStatus.UNPIN_FAILED
+                        affinityDuringRun = readAllowedCores(session)
+                        issue = true
+                        fatalIssue = true
                     } else {
+                        status = prepared.status
+                        nThreads = prepared.nThreads
                         session.configureThreadCounts(prepared.nThreads, prepared.nThreads)
+                        affinityDuringRun = readAllowedCores(session)
 
-                        // Verify the mask immediately before the first call that can load a context.
-                        val allowedAtGeneration = readAllowedCores(session)
-                        if (!prepared.matches(allowedAtGeneration)) return LocalModelSelfTestOutcome.Failure
-                        if (!canContinue(cancellation)) return LocalModelSelfTestOutcome.Failure
+                        if (!prepared.canGenerate) {
+                            issue = true
+                        } else if (!prepared.matches(affinityDuringRun)) {
+                            status = if (configuration.isPinned) {
+                                LocalModelSelfTestRunStatus.PIN_FAILED
+                            } else {
+                                LocalModelSelfTestRunStatus.AFFINITY_UNAVAILABLE
+                            }
+                            issue = true
+                        } else {
+                            val promptBuild = exactPromptForTarget(
+                                session = session,
+                                context = SELF_TEST_CONTEXT,
+                                basePrompt = mode.basePrompt(),
+                                targetTokenCount = mode.targetPromptTokens,
+                                cancellation = cancellation
+                            )
+                            promptTokens = promptBuild.observedTokenCount
+                            if (!canContinue(cancellation)) return LocalModelSelfTestOutcome.Failure
+                            val exactPrompt = promptBuild.prompt
+                            if (exactPrompt == null) {
+                                status = LocalModelSelfTestRunStatus.PROMPT_TOKEN_TARGET_UNAVAILABLE
+                                issue = true
+                                fatalIssue = true
+                            } else {
+                                // Read back on the same worker immediately before generation.
+                                affinityDuringRun = readAllowedCores(session)
+                                if (!prepared.matches(affinityDuringRun)) {
+                                    status = if (configuration.isPinned) {
+                                        LocalModelSelfTestRunStatus.PIN_FAILED
+                                    } else {
+                                        LocalModelSelfTestRunStatus.AFFINITY_UNAVAILABLE
+                                    }
+                                    issue = true
+                                } else if (!canContinue(cancellation)) {
+                                    return LocalModelSelfTestOutcome.Failure
+                                } else {
+                                    val response = session.inferenceEngine.generate(
+                                        fixedRequest(mode, exactPrompt)
+                                    ).getOrNull()
+                                    if (response == null) {
+                                        status = LocalModelSelfTestRunStatus.INFERENCE_FAILED
+                                        issue = true
+                                        fatalIssue = true
+                                    } else if (!canContinue(cancellation)) {
+                                        return LocalModelSelfTestOutcome.Failure
+                                    } else {
+                                        val measurements = session.latestMeasurements()
+                                        val actualPromptTokens = response.usage.prompt_tokens
+                                        val generatedTokens = response.usage.completion_tokens
+                                        promptTokens = actualPromptTokens
+                                        firstTokenTimeMs = measurements?.firstTokenTimeMs?.takeIf { generatedTokens > 0 }
+                                        prefillRate = measurements?.prefillTokensPerSecond
+                                        decodeRate = measurements?.decodeTokensPerSecond
 
-                        val response = session.inferenceEngine.generate(fixedRequest(configuration)).getOrNull()
-                            ?: return LocalModelSelfTestOutcome.Failure
-                        if (!canContinue(cancellation)) return LocalModelSelfTestOutcome.Failure
-
-                        val measurements = session.latestMeasurements()
-                            ?: return LocalModelSelfTestOutcome.Failure
-                        val promptTokens = response.usage.prompt_tokens
-                        val generatedTokens = response.usage.completion_tokens
-                        // PROVISIONAL - pending GEN-PERF-1
-                        val prefillRate = measurements.prefillTokensPerSecond
-                        val decodeRate = measurements.decodeTokensPerSecond
-                        if (promptTokens < MIN_PROMPT_TOKENS ||
-                            (configuration.isPrefill && promptTokens < MIN_PREFILL_PROMPT_TOKENS) ||
-                            generatedTokens !in MIN_OUTPUT_TOKENS..MAX_OUTPUT_TOKENS ||
-                            measurements.tokenCount != generatedTokens ||
-                            measurements.firstTokenTimeMs < 0L ||
-                            prefillRate == null || !prefillRate.isFinite() || prefillRate <= 0.0 ||
-                            (decodeRate != null && (!decodeRate.isFinite() || decodeRate <= 0.0))
-                        ) {
-                            return LocalModelSelfTestOutcome.Failure
+                                        val outputCountValid = if (mode.isPrefillOnly) {
+                                            generatedTokens in 0..mode.maxOutputTokens
+                                        } else {
+                                            generatedTokens in MIN_OUTPUT_TOKENS..mode.maxOutputTokens
+                                        }
+                                        val firstTokenValid = (mode.isPrefillOnly && generatedTokens == 0) ||
+                                            (measurements?.firstTokenTimeMs ?: -1L) > 0L
+                                        val validMetrics = measurements != null &&
+                                            actualPromptTokens == mode.targetPromptTokens &&
+                                            outputCountValid &&
+                                            measurements.tokenCount == generatedTokens &&
+                                            firstTokenValid &&
+                                            prefillRate != null && prefillRate.isFinite() && prefillRate > 0.0 &&
+                                            (decodeRate == null || (decodeRate.isFinite() && decodeRate > 0.0))
+                                        if (actualPromptTokens != mode.targetPromptTokens) {
+                                            status = LocalModelSelfTestRunStatus.PROMPT_TOKEN_TARGET_MISMATCH
+                                            issue = true
+                                            fatalIssue = true
+                                        } else if (!validMetrics) {
+                                            status = LocalModelSelfTestRunStatus.INVALID_METRICS
+                                            issue = true
+                                            fatalIssue = true
+                                        } else {
+                                            status = prepared.status
+                                            generated = true
+                                        }
+                                    }
+                                }
+                            }
                         }
-
-                        caseMetrics += LocalModelSelfTestCaseMetrics(
-                            configuration = configuration,
-                            runNumber = index.inc(),
-                            nThreads = prepared.nThreads,
-                            affinityBeforeCoreIds = affinityBeforeRun,
-                            allowedCoreIds = allowedAtGeneration,
-                            affinityAfterCoreIds = affinityAfterRun,
-                            promptTokenCount = promptTokens,
-                            firstTokenTimeMs = measurements.firstTokenTimeMs,
-                            prefillTokensPerSecond = prefillRate,
-                            decodeTokensPerSecond = decodeRate,
-                            status = prepared.status
-                        )
-                        generated = true
                     }
+                } catch (_: Throwable) {
+                    status = LocalModelSelfTestRunStatus.INFERENCE_FAILED
+                    issue = true
+                    fatalIssue = true
                 } finally {
-                    // Restore on the same worker in every exit path, before closing the session.
+                    // Restore on the same dedicated worker in every exit path, before closing.
                     val baseline = originalAffinity
                     if (session != null && baseline != null) {
                         affinityRestored = restoreAffinity(session, baseline)
@@ -237,21 +420,38 @@ internal class LocalModelSelfTestRunner(
                     ) {
                         affinityRestored = false
                     }
-                    replaceRunAffinities(
-                        caseMetrics,
-                        index.inc(),
-                        affinityBeforeRun,
-                        affinityAfterRun
-                    )
                 }
 
                 if (!affinityRestored) {
-                    replaceRunStatus(caseMetrics, index.inc(), LocalModelSelfTestRunStatus.UNPIN_FAILED)
-                    return partialFailure(caseMetrics, lastSession)
+                    status = LocalModelSelfTestRunStatus.UNPIN_FAILED
+                    issue = true
+                    fatalIssue = true
                 }
-                if (affinitySetupFailed) return partialFailure(caseMetrics, lastSession)
-                if (generated && index < EXECUTION_PLAN.lastIndex) {
-                    if (!waitBetweenRuns(cancellation) || !canContinue(cancellation)) {
+                caseMetrics += LocalModelSelfTestCaseMetrics(
+                    configuration = configuration,
+                    runNumber = index.inc(),
+                    nThreads = nThreads,
+                    affinityBeforeCoreIds = affinityBeforeRun,
+                    allowedCoreIds = affinityDuringRun,
+                    affinityAfterCoreIds = affinityAfterRun,
+                    promptTokenCount = promptTokens,
+                    firstTokenTimeMs = firstTokenTimeMs,
+                    prefillTokensPerSecond = prefillRate,
+                    decodeTokensPerSecond = decodeRate,
+                    status = status
+                )
+
+                if (cancellation.isCancelled()) return LocalModelSelfTestOutcome.Failure
+                if (issue) {
+                    anyRunFailed = true
+                    // Sweep pin/readback failures remain visible as skipped samples; other failures
+                    // are terminal. Quick and prefill actions fail closed if B cannot be verified.
+                    if (fatalIssue || mode != LocalModelSelfTestMode.SWEEP_ABD) {
+                        return partialFailure(mode, caseMetrics, lastSession)
+                    }
+                }
+                if (generated && index < mode.configurations.lastIndex && mode.interRunRestMs > 0L) {
+                    if (!waitBetweenRuns(cancellation, mode.interRunRestMs) || !canContinue(cancellation)) {
                         return LocalModelSelfTestOutcome.Failure
                     }
                 }
@@ -262,12 +462,16 @@ internal class LocalModelSelfTestRunner(
                 ?: return LocalModelSelfTestOutcome.Failure
             if (!canContinue(cancellation)) return LocalModelSelfTestOutcome.Failure
 
-            return LocalModelSelfTestOutcome.Success(
-                LocalModelSelfTestMetrics(
-                    cases = caseMetrics.toList(),
-                    systemInfo = systemInfo
-                )
+            val metrics = LocalModelSelfTestMetrics(
+                mode = mode,
+                cases = caseMetrics.toList(),
+                systemInfo = systemInfo
             )
+            return if (anyRunFailed) {
+                LocalModelSelfTestOutcome.PartialFailure(metrics)
+            } else {
+                LocalModelSelfTestOutcome.Success(metrics)
+            }
         } catch (_: Throwable) {
             return LocalModelSelfTestOutcome.Failure
         } finally {
@@ -275,130 +479,127 @@ internal class LocalModelSelfTestRunner(
         }
     }
 
-    private fun failedAffinityCase(
-        configuration: LocalModelSelfTestConfiguration,
-        runNumber: Int,
-        affinityBeforeCoreIds: List<Int>?,
-        allowedCoreIds: List<Int>?
-    ): LocalModelSelfTestCaseMetrics = LocalModelSelfTestCaseMetrics(
-        configuration = configuration,
-        runNumber = runNumber,
-        nThreads = FALLBACK_N_THREADS,
-        affinityBeforeCoreIds = affinityBeforeCoreIds,
-        allowedCoreIds = allowedCoreIds,
-        affinityAfterCoreIds = null,
-        promptTokenCount = null,
-        firstTokenTimeMs = null,
-        prefillTokensPerSecond = null,
-        decodeTokensPerSecond = null,
-        status = LocalModelSelfTestRunStatus.UNPIN_FAILED
+    private data class PromptBuildResult(
+        val prompt: String?,
+        val observedTokenCount: Int?
     )
 
-    private fun replaceRunStatus(
-        cases: MutableList<LocalModelSelfTestCaseMetrics>,
-        runNumber: Int,
-        status: LocalModelSelfTestRunStatus
-    ) {
-        val position = cases.indexOfLast { it.runNumber == runNumber }
-        if (position >= 0) cases[position] = cases[position].copy(status = status)
-    }
+    private fun exactPromptForTarget(
+        session: LocalModelSelfTestSession,
+        context: String,
+        basePrompt: String,
+        targetTokenCount: Int,
+        cancellation: LocalModelSelfTestCancellation
+    ): PromptBuildResult {
+        var prompt = basePrompt
+        var tokenCount = session.formattedPromptTokenCount(context, prompt)
+            ?: return PromptBuildResult(null, null)
+        if (tokenCount > targetTokenCount) return PromptBuildResult(null, tokenCount)
+        if (tokenCount == targetTokenCount) return PromptBuildResult(prompt, tokenCount)
 
-    private fun replaceRunAffinities(
-        cases: MutableList<LocalModelSelfTestCaseMetrics>,
-        runNumber: Int,
-        affinityBeforeCoreIds: List<Int>?,
-        affinityAfterCoreIds: List<Int>?
-    ) {
-        val position = cases.indexOfLast { it.runNumber == runNumber }
-        if (position >= 0) {
-            cases[position] = cases[position].copy(
-                affinityBeforeCoreIds = affinityBeforeCoreIds,
-                affinityAfterCoreIds = affinityAfterCoreIds
-            )
+        var attempts = 0
+        while (tokenCount < targetTokenCount && attempts++ < MAX_PROMPT_PADDING_STEPS) {
+            if (!canContinue(cancellation)) return PromptBuildResult(null, tokenCount)
+            var bestNextPrompt: String? = null
+            var bestNextCount = tokenCount
+            for (atom in PROMPT_PADDING_ATOMS) {
+                if (!canContinue(cancellation)) return PromptBuildResult(null, tokenCount)
+                val candidate = "$prompt $atom"
+                val candidateCount = session.formattedPromptTokenCount(context, candidate) ?: continue
+                if (candidateCount == targetTokenCount) return PromptBuildResult(candidate, candidateCount)
+                if (candidateCount == tokenCount + 1) {
+                    bestNextPrompt = candidate
+                    bestNextCount = candidateCount
+                    break
+                }
+                if (candidateCount in (bestNextCount + 1) until targetTokenCount) {
+                    bestNextPrompt = candidate
+                    bestNextCount = candidateCount
+                }
+            }
+            if (bestNextPrompt == null) return PromptBuildResult(null, tokenCount)
+            prompt = bestNextPrompt
+            tokenCount = bestNextCount
         }
+        return if (tokenCount == targetTokenCount) PromptBuildResult(prompt, tokenCount)
+        else PromptBuildResult(null, tokenCount)
     }
 
-    private fun partialFailure(
-        cases: List<LocalModelSelfTestCaseMetrics>,
-        lastSession: LocalModelSelfTestSession?
-    ): LocalModelSelfTestOutcome.PartialFailure {
-        val systemInfo = runCatching { lastSession?.systemInfo() }
-            .getOrNull()
-            ?.takeIf(String::isNotBlank)
-            ?: SYSTEM_INFO_UNAVAILABLE
-        return LocalModelSelfTestOutcome.PartialFailure(
-            LocalModelSelfTestMetrics(cases = cases.toList(), systemInfo = systemInfo)
-        )
+    private data class PreparedRun(
+        val status: LocalModelSelfTestRunStatus,
+        val nThreads: Int,
+        val expectedMask: List<Int>?,
+        val canGenerate: Boolean
+    ) {
+        fun matches(actualMask: List<Int>?): Boolean = actualMask != null && actualMask == expectedMask
     }
 
+    /** Returns null only when restoring the original mask itself failed. */
     private fun prepareRun(
         session: LocalModelSelfTestSession,
         configuration: LocalModelSelfTestConfiguration,
         baseline: List<Int>?,
         strongCoreIds: List<Int>?
     ): PreparedRun? {
-        if (baseline != null && !restoreAffinity(session, baseline)) return null
-
-        if (!configuration.isPinned) {
-            if (baseline == null) {
-                return PreparedRun(
-                    LocalModelSelfTestRunStatus.AFFINITY_UNAVAILABLE,
-                    FALLBACK_N_THREADS,
-                    expectedMask = readAllowedCores(session)
-                )
-            }
-            val allowed = readAllowedCores(session)
-            if (allowed == baseline) {
-                return PreparedRun(LocalModelSelfTestRunStatus.UNPINNED, FALLBACK_N_THREADS, baseline)
-            }
-            // Do not call a run unpinned unless the kernel's actual mask equals the saved mask.
-            if (!restoreAffinity(session, baseline) || readAllowedCores(session) != baseline) return null
-            return PreparedRun(LocalModelSelfTestRunStatus.UNPINNED, FALLBACK_N_THREADS, baseline)
-        }
-
         if (baseline == null) {
             return PreparedRun(
                 LocalModelSelfTestRunStatus.AFFINITY_UNAVAILABLE,
-                FALLBACK_N_THREADS,
-                expectedMask = null
+                configuration.nThreads,
+                expectedMask = null,
+                canGenerate = false
             )
         }
+        if (!restoreAffinity(session, baseline)) return null
+
+        if (!configuration.isPinned) {
+            val currentMask = readAllowedCores(session)
+            return if (currentMask == baseline) {
+                PreparedRun(
+                    LocalModelSelfTestRunStatus.BASELINE_UNPINNED,
+                    FALLBACK_N_THREADS,
+                    expectedMask = baseline,
+                    canGenerate = true
+                )
+            } else {
+                null
+            }
+        }
+
         if (strongCoreIds == null) {
             return PreparedRun(
                 LocalModelSelfTestRunStatus.CPU_FREQUENCY_UNAVAILABLE,
-                FALLBACK_N_THREADS,
-                expectedMask = baseline
+                configuration.nThreads,
+                expectedMask = baseline,
+                canGenerate = false
             )
         }
         val targetCores = strongCoreIds.take(configuration.nThreads)
         if (targetCores.size < configuration.nThreads) {
             return PreparedRun(
                 LocalModelSelfTestRunStatus.NOT_ENOUGH_STRONG_CORES,
-                FALLBACK_N_THREADS,
-                expectedMask = baseline
+                configuration.nThreads,
+                expectedMask = baseline,
+                canGenerate = false
             )
         }
 
         val pinApplied = runCatching { session.setThreadAffinity(targetCores) }.getOrDefault(false)
         val allowedAfterPin = readAllowedCores(session)
         if (pinApplied && allowedAfterPin == targetCores) {
-            return PreparedRun(LocalModelSelfTestRunStatus.PINNED, configuration.nThreads, targetCores)
+            return PreparedRun(
+                LocalModelSelfTestRunStatus.PINNED,
+                configuration.nThreads,
+                expectedMask = targetCores,
+                canGenerate = true
+            )
         }
         if (!restoreAffinity(session, baseline)) return null
-        return PreparedRun(LocalModelSelfTestRunStatus.PIN_FAILED, FALLBACK_N_THREADS, baseline)
-    }
-
-    private data class PreparedRun(
-        val status: LocalModelSelfTestRunStatus,
-        val nThreads: Int,
-        val expectedMask: List<Int>?
-    ) {
-        fun matches(actualMask: List<Int>?): Boolean = when (status) {
-            LocalModelSelfTestRunStatus.AFFINITY_UNAVAILABLE -> expectedMask == null || actualMask == expectedMask
-            LocalModelSelfTestRunStatus.PINNED -> actualMask == expectedMask
-            LocalModelSelfTestRunStatus.UNPINNED -> actualMask != null && actualMask == expectedMask
-            else -> expectedMask == null || actualMask == expectedMask
-        }
+        return PreparedRun(
+            LocalModelSelfTestRunStatus.PIN_FAILED,
+            configuration.nThreads,
+            expectedMask = baseline,
+            canGenerate = false
+        )
     }
 
     private fun readAllowedCores(session: LocalModelSelfTestSession): List<Int>? =
@@ -417,59 +618,44 @@ internal class LocalModelSelfTestRunner(
     private fun canContinue(cancellation: LocalModelSelfTestCancellation): Boolean =
         !cancellation.isCancelled() && runCatching(isEligible).getOrDefault(false)
 
-    private fun fixedRequest(configuration: LocalModelSelfTestConfiguration): InferenceRequest =
+    private fun fixedRequest(mode: LocalModelSelfTestMode, prompt: String): InferenceRequest =
         InferenceRequest(
-            prompt = if (configuration.isPrefill) PREFILL_PROMPT else SELF_TEST_PROMPT,
+            prompt = prompt,
             context = SELF_TEST_CONTEXT,
             params = GenerateParams(
-                max_tokens = MAX_OUTPUT_TOKENS,
+                max_tokens = mode.maxOutputTokens,
                 temperature = SELF_TEST_TEMPERATURE,
                 top_p = SELF_TEST_TOP_P
             )
         )
 
-    private companion object {
-        // PROVISIONAL - pending GEN-PERF-1
-        // Fixed Latin-square crossover: each A/B/D configuration appears once in each position.
-        val SWEEP_PLAN = listOf(
-            LocalModelSelfTestConfiguration.A,
-            LocalModelSelfTestConfiguration.B,
-            LocalModelSelfTestConfiguration.D,
-            LocalModelSelfTestConfiguration.B,
-            LocalModelSelfTestConfiguration.D,
-            LocalModelSelfTestConfiguration.A,
-            LocalModelSelfTestConfiguration.D,
-            LocalModelSelfTestConfiguration.A,
-            LocalModelSelfTestConfiguration.B
+    private fun partialFailure(
+        mode: LocalModelSelfTestMode,
+        cases: List<LocalModelSelfTestCaseMetrics>,
+        lastSession: LocalModelSelfTestSession?
+    ): LocalModelSelfTestOutcome.PartialFailure {
+        val systemInfo = runCatching { lastSession?.systemInfo() }
+            .getOrNull()
+            ?.takeIf(String::isNotBlank)
+            ?: SYSTEM_INFO_UNAVAILABLE
+        return LocalModelSelfTestOutcome.PartialFailure(
+            LocalModelSelfTestMetrics(mode = mode, cases = cases.toList(), systemInfo = systemInfo)
         )
-        // PROVISIONAL - pending GEN-PERF-1
-        val EXECUTION_PLAN = listOf(LocalModelSelfTestConfiguration.WARM_UP_B) + SWEEP_PLAN +
-            listOf(LocalModelSelfTestConfiguration.PREFILL_B, LocalModelSelfTestConfiguration.PREFILL_B)
-        // PROVISIONAL - pending GEN-PERF-1
+    }
+
+    private companion object {
         const val FALLBACK_N_THREADS = 2
-        // PROVISIONAL - pending GEN-PERF-1
-        const val COOLDOWN_MILLIS = 20_000L
-        // PROVISIONAL - pending GEN-PERF-1
-        const val MAX_OUTPUT_TOKENS = 8
-        // PROVISIONAL - pending GEN-PERF-1
         const val MIN_OUTPUT_TOKENS = 1
-        // PROVISIONAL - pending GEN-PERF-1
-        const val MIN_PROMPT_TOKENS = 1
-        // PROVISIONAL - pending GEN-PERF-1
-        const val MIN_PREFILL_PROMPT_TOKENS = 513
-        // PROVISIONAL - pending GEN-PERF-1
+        const val MAX_PROMPT_PADDING_STEPS = 700
         const val SELF_TEST_TEMPERATURE = 0.0f
-        // PROVISIONAL - pending GEN-PERF-1
         const val SELF_TEST_TOP_P = 1.0f
-        const val PREFILL_SENTENCE =
-            "Please reply with one short harmless greeting. This is a fixed CPU prefill check using only neutral sample text and no user data."
-        // PROVISIONAL - pending GEN-PERF-1
-        const val PREFILL_SENTENCE_REPETITIONS = 22
-        // A fixed, approximately 500-token code-only prompt; no user content is appended.
-        val PREFILL_PROMPT = List(PREFILL_SENTENCE_REPETITIONS) { PREFILL_SENTENCE }.joinToString(" ")
         const val SELF_TEST_CONTEXT =
             "Local runtime self-test only. Reply with a short harmless greeting. Do not use tools or take actions."
-        const val SELF_TEST_PROMPT = "Say hello in a few words."
         const val SYSTEM_INFO_UNAVAILABLE = "System information unavailable"
+        val PROMPT_PADDING_ATOMS = listOf(
+            "neutral", "sample", "plain", "local", "CPU", "check", "safe", "harmless",
+            "fixed", "ordinary", "text", "data", "please", "reply", "greeting", "one",
+            "short", "small", "token", "hello", "a", "the", "x", "okay", "0", "."
+        )
     }
 }

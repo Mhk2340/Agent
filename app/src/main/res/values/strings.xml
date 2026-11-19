@@ -43,22 +43,51 @@
     <string name="model_import_status_mismatch">The selected file did not match the pinned SHA‑256. No unverified file was installed.</string>
     <string name="model_import_status_failed">Model import failed. No unverified file was installed.</string>
     <string name="model_import_button">Choose model file</string>
-    <string name="local_model_self_test_button">Run local model self-test</string>
-    <string name="local_model_self_test_succeeded">Local model self-test succeeded.</string>
-    <string name="local_model_self_test_failed">Local model self-test failed.</string>
+    <string name="local_model_self_test_button">Quick B run — 41-token prompt (max 16 output tokens)</string>
+    <string name="local_model_self_test_prefill_button">B prefill — 606-token prompt (max 4 output tokens)</string>
+    <string name="local_model_self_test_sweep_button">Debug-only A → B → D sweep (one pass)</string>
+    <string name="local_model_self_test_cancel_button">Cancel test</string>
+    <string name="local_model_self_test_progress">Run %1$d of %2$d — %3$s — %4$d s elapsed</string>
+    <string name="local_model_self_test_progress_cancelling">Cancelling run %1$d of %2$d… %3$d s elapsed</string>
+    <string name="local_model_self_test_progress_timed_out">Stopping after timeout… %1$d s elapsed</string>
+    <string name="local_model_self_test_succeeded">Local model test succeeded.</string>
+    <string name="local_model_self_test_failed">Local model test failed.</string>
+    <string name="local_model_self_test_cancelled">Local model test cancelled.</string>
+    <string name="local_model_self_test_timed_out">Local model test timed out and was cancelled.</string>
+    <string name="local_model_self_test_mode_quick">Quick B — one run</string>
+    <string name="local_model_self_test_mode_prefill">B prefill — one run</string>
+    <string name="local_model_self_test_mode_sweep">A/B/D debug sweep — one pass</string>
+    <string name="local_model_self_test_configuration_a">A — one thread, explicitly pinned</string>
+    <string name="local_model_self_test_configuration_b">B — two threads, explicitly pinned to detected strong cores</string>
+    <string name="local_model_self_test_configuration_d">D — two threads, saved baseline mask; no explicit pin</string>
+    <string name="local_model_self_test_order_quick">Question: on this device, what TTFT, prompt prefill and decode rates does B produce with two threads and verified strong-core affinity? One generation only.</string>
+    <string name="local_model_self_test_order_prefill">Question: what prompt-prefill rate does configuration B produce for exactly 606 formatted prompt tokens? One generation; four-token output cap.</string>
+    <string name="local_model_self_test_order_sweep">Debug-only exploratory pass A → B → D; not needed for a speed decision. At most 5 seconds between runs.</string>
+    <string name="local_model_self_test_mode_label">Test action: %1$s</string>
+    <string name="local_model_self_test_estimated_time">Expected time budget (not device-measured): %1$d × (%2$s s first-token wall budget + %3$s s decode budget + %4$s s rest) = %5$s s. First-token budget includes model-load and prompt-count setup; the measured TTFT is reported separately.</string>
+    <string name="local_model_self_test_status_pinned">pinned; readback verified</string>
+    <string name="local_model_self_test_status_baseline">saved baseline; no explicit pin</string>
+    <string name="local_model_self_test_status_pin_failed">pin failed</string>
+    <string name="local_model_self_test_status_restore_failed">affinity restore failed</string>
+    <string name="local_model_self_test_status_cpu_frequency_unavailable">CPU frequency unavailable</string>
+    <string name="local_model_self_test_status_not_enough_cores">not enough strong cores</string>
+    <string name="local_model_self_test_status_affinity_unavailable">affinity unavailable</string>
+    <string name="local_model_self_test_status_prompt_target_unavailable">could not form exact prompt-token target</string>
+    <string name="local_model_self_test_status_prompt_target_mismatch">prompt-token target mismatch</string>
+    <string name="local_model_self_test_status_invalid_metrics">invalid inference metrics</string>
+    <string name="local_model_self_test_status_inference_failed">inference failed</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_case_header">%1$s — run %2$d — PROVISIONAL - pending GEN-PERF-1 (n=1)</string>
+    <string name="local_model_self_test_case_header">%1$s — run %2$d</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_n_threads">n_threads — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d</string>
-    <string name="local_model_self_test_order">Sweep order: fixed counterbalanced crossover A–B–D / B–D–A / D–A–B</string>
+    <string name="local_model_self_test_n_threads">n_threads: %1$d</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_affinity_before">Affinity before run (saved mask) — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$s</string>
+    <string name="local_model_self_test_affinity_before">Affinity before run (saved baseline): %1$s</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_allowed_cores">Allowed CPUs during generation (sched_getaffinity readback) — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$s</string>
+    <string name="local_model_self_test_allowed_cores">Affinity during run (same-worker readback immediately before generation) — PROVISIONAL (n=1): %1$s</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_affinity_after">Affinity after run (verified) — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$s</string>
+    <string name="local_model_self_test_affinity_after">Affinity after run (restore verified): %1$s</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_prompt_tokens">Prompt token count — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d</string>
+    <string name="local_model_self_test_prompt_tokens">Formatted prompt tokens (includes system message and chat template) — PROVISIONAL (n=1): %1$d</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
     <string name="local_model_self_test_prompt_tokens_unavailable">Prompt token count — PROVISIONAL - pending GEN-PERF-1 (n=1): not measured</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->

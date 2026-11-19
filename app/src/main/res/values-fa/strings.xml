@@ -43,22 +43,51 @@
     <string name="model_import_status_mismatch">SHA‑256 فایل انتخاب‌شده با مقدار ثابت مدل تطبیق نداشت. هیچ فایل تأییدنشده‌ای نصب نشد.</string>
     <string name="model_import_status_failed">واردکردن مدل ناموفق بود. هیچ فایل تأییدنشده‌ای نصب نشد.</string>
     <string name="model_import_button">انتخاب فایل مدل</string>
-    <string name="local_model_self_test_button">اجرای خودآزمایی مدل محلی</string>
-    <string name="local_model_self_test_succeeded">خودآزمایی مدل محلی موفق بود.</string>
-    <string name="local_model_self_test_failed">خودآزمایی مدل محلی ناموفق بود.</string>
+    <string name="local_model_self_test_button">اجرای سریع B — prompt با ۴۱ توکن (حداکثر ۱۶ توکن خروجی)</string>
+    <string name="local_model_self_test_prefill_button">prefill پیکربندی B — prompt با ۶۰۶ توکن (حداکثر ۴ توکن خروجی)</string>
+    <string name="local_model_self_test_sweep_button">sweep فقط در debug: A ← B ← D (یک گذر)</string>
+    <string name="local_model_self_test_cancel_button">لغو آزمایش</string>
+    <string name="local_model_self_test_progress">اجرای %1$d از %2$d — %3$s — زمان سپری‌شده: %4$d ثانیه</string>
+    <string name="local_model_self_test_progress_cancelling">در حال توقف اجرای %1$d از %2$d… زمان سپری‌شده: %3$d ثانیه</string>
+    <string name="local_model_self_test_progress_timed_out">پس از پایان مهلت در حال توقف… زمان سپری‌شده: %1$d ثانیه</string>
+    <string name="local_model_self_test_succeeded">آزمایش مدل محلی موفق بود.</string>
+    <string name="local_model_self_test_failed">آزمایش مدل محلی ناموفق بود.</string>
+    <string name="local_model_self_test_cancelled">آزمایش مدل محلی لغو شد.</string>
+    <string name="local_model_self_test_timed_out">مهلت آزمایش تمام شد و اجرا لغو شد.</string>
+    <string name="local_model_self_test_mode_quick">B سریع — یک اجرا</string>
+    <string name="local_model_self_test_mode_prefill">prefill پیکربندی B — یک اجرا</string>
+    <string name="local_model_self_test_mode_sweep">sweep آزمایشی A/B/D — یک گذر</string>
+    <string name="local_model_self_test_configuration_a">A — یک ترد، pin صریح</string>
+    <string name="local_model_self_test_configuration_b">B — دو ترد، pin صریح روی هسته‌های قوی تشخیص‌داده‌شده</string>
+    <string name="local_model_self_test_configuration_d">D — دو ترد، ماسک پایهٔ ذخیره‌شده؛ بدون pin صریح</string>
+    <string name="local_model_self_test_order_quick">پرسش: روی این دستگاه، TTFT و نرخ prefill/decode در B با دو ترد و affinity تأییدشدهٔ هسته‌های قوی چقدر است؟ فقط یک تولید.</string>
+    <string name="local_model_self_test_order_prefill">پرسش: نرخ prefill پیکربندی B برای دقیقاً ۶۰۶ توکن prompt قالب‌بندی‌شده چقدر است؟ یک تولید؛ سقف خروجی چهار توکن.</string>
+    <string name="local_model_self_test_order_sweep">گذر آزمایشی فقط در debug: A ← B ← D؛ برای تصمیم سرعت لازم نیست. فاصلهٔ بین اجراها حداکثر ۵ ثانیه.</string>
+    <string name="local_model_self_test_mode_label">نوع آزمایش: %1$s</string>
+    <string name="local_model_self_test_estimated_time">برآورد برنامه‌ریزی (نه اندازه‌گیری دستگاه): %1$d × (%2$s ثانیه بودجهٔ دیواری تا توکن اول + %3$s ثانیه بودجهٔ decode + %4$s ثانیه استراحت) = %5$s ثانیه. بودجهٔ توکن اول بارگذاری مدل و شمارش prompt را هم شامل می‌شود؛ TTFT اندازه‌گیری‌شده جدا گزارش می‌شود.</string>
+    <string name="local_model_self_test_status_pinned">pin شد؛ readback تأیید شد</string>
+    <string name="local_model_self_test_status_baseline">ماسک پایهٔ ذخیره‌شده؛ بدون pin صریح</string>
+    <string name="local_model_self_test_status_pin_failed">pin ناموفق</string>
+    <string name="local_model_self_test_status_restore_failed">بازگردانی affinity ناموفق</string>
+    <string name="local_model_self_test_status_cpu_frequency_unavailable">فرکانس CPU در دسترس نیست</string>
+    <string name="local_model_self_test_status_not_enough_cores">هستهٔ قوی کافی نیست</string>
+    <string name="local_model_self_test_status_affinity_unavailable">affinity در دسترس نیست</string>
+    <string name="local_model_self_test_status_prompt_target_unavailable">ساخت prompt با تعداد توکن دقیق ممکن نشد</string>
+    <string name="local_model_self_test_status_prompt_target_mismatch">تعداد توکن prompt با هدف تطبیق نداشت</string>
+    <string name="local_model_self_test_status_invalid_metrics">معیارهای inference نامعتبر</string>
+    <string name="local_model_self_test_status_inference_failed">inference ناموفق</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_case_header">پیکربندی %1$s — اجرای %2$d — PROVISIONAL - pending GEN-PERF-1 (n=1)</string>
+    <string name="local_model_self_test_case_header">%1$s — اجرای %2$d</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_n_threads">n_threads — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d</string>
-    <string name="local_model_self_test_order">ترتیب sweep: متقاطع متوازن ثابت A–B–D / B–D–A / D–A–B</string>
+    <string name="local_model_self_test_n_threads">n_threads: %1$d</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_affinity_before">affinity پیش از اجرا (mask ذخیره‌شده) — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$s</string>
+    <string name="local_model_self_test_affinity_before">affinity پیش از اجرا (ماسک پایهٔ ذخیره‌شده): %1$s</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_allowed_cores">CPUهای مجاز هنگام تولید (بازخوانی sched_getaffinity) — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$s</string>
+    <string name="local_model_self_test_allowed_cores">affinity هنگام اجرا (readback روی همان worker درست پیش از generation) — موقت (n=1): %1$s</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_affinity_after">affinity پس از اجرا (تأییدشده) — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$s</string>
+    <string name="local_model_self_test_affinity_after">affinity پس از اجرا (بازگشت تأیید شد): %1$s</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
-    <string name="local_model_self_test_prompt_tokens">تعداد توکن‌های prompt — PROVISIONAL - pending GEN-PERF-1 (n=1): %1$d</string>
+    <string name="local_model_self_test_prompt_tokens">تعداد توکن prompt قالب‌بندی‌شده (با پیام system و قالب گفتگو): %1$d</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
     <string name="local_model_self_test_prompt_tokens_unavailable">تعداد توکن‌های prompt — PROVISIONAL - pending GEN-PERF-1 (n=1): اندازه‌گیری نشد</string>
     <!-- // PROVISIONAL - pending GEN-PERF-1 -->
