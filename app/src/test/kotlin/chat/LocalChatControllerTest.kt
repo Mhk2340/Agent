@@ -184,6 +184,7 @@ class LocalChatControllerTest {
         val inference = FakeInference().apply {
             countPrompt = { _, messages -> messages.size * 10 }
             generationFailure = IllegalStateException("private prompt must not be logged")
+            emitDraftBeforeResult = false
         }
         val controller = LocalChatController(
             historyStore = MemoryHistoryStore(),
@@ -205,6 +206,55 @@ class LocalChatControllerTest {
             val report = diagnosticLog.snapshot().joinToString("\n")
             assertTrue(report.contains(DiagnosticCode.CHAT_SEND_FAILED.wireCode))
             assertFalse(report.contains("private prompt must not be logged"))
+        } finally {
+            controller.close()
+        }
+    }
+
+    @Test
+    fun emptySuccessfulGenerationMarksTheUserMessageForRetryAndDoesNotKeepAnAssistantBubble() {
+        val inference = FakeInference().apply {
+            countPrompt = { _, messages -> messages.size * 10 }
+            emitDraftBeforeResult = false
+            successfulText = ""
+        }
+        val controller = controller(MemoryHistoryStore(), inference)
+        try {
+            controller.open()
+            await { !controller.state().isHistoryLoading }
+            assertTrue(controller.send("retry empty answer"))
+            await { !controller.state().isGenerating && controller.state().error == LocalChatError.GENERATION_FAILED }
+
+            val messages = controller.state().activeConversation!!.messages
+            assertEquals(1, messages.size)
+            assertEquals(LocalChatRole.USER, messages.single().role)
+            assertEquals(LocalChatMessageStatus.FAILED, messages.single().status)
+            assertFalse(messages.any { it.role == LocalChatRole.ASSISTANT })
+        } finally {
+            controller.close()
+        }
+    }
+
+    @Test
+    fun partialGenerationFailurePreservesPartialTextButMarksTheUserMessageForRetry() {
+        val inference = FakeInference().apply {
+            countPrompt = { _, messages -> messages.size * 10 }
+            generationFailure = IllegalStateException("generation failed after a partial token")
+        }
+        val controller = controller(MemoryHistoryStore(), inference)
+        try {
+            controller.open()
+            await { !controller.state().isHistoryLoading }
+            assertTrue(controller.send("retry partial answer"))
+            await { !controller.state().isGenerating && controller.state().error == LocalChatError.GENERATION_FAILED }
+
+            val messages = controller.state().activeConversation!!.messages
+            assertEquals(2, messages.size)
+            assertEquals(LocalChatRole.USER, messages[0].role)
+            assertEquals(LocalChatMessageStatus.FAILED, messages[0].status)
+            assertEquals(LocalChatRole.ASSISTANT, messages[1].role)
+            assertEquals("draft", messages[1].content)
+            assertEquals(LocalChatMessageStatus.FAILED, messages[1].status)
         } finally {
             controller.close()
         }
@@ -335,6 +385,10 @@ class LocalChatControllerTest {
         @Volatile
         var blockAfterFirstSnapshot = false
         @Volatile
+        var emitDraftBeforeResult = true
+        @Volatile
+        var successfulText = "final answer"
+        @Volatile
         var generationFailure: Throwable? = null
         @Volatile
         var generatedMessages = AtomicReference<List<LocalChatPromptMessage>>(emptyList())
@@ -367,20 +421,22 @@ class LocalChatControllerTest {
             generateCalls.incrementAndGet()
             generatedMessages.set(messages.toList())
             onPromptTokenCount(messages.size * 10)
-            onTextSnapshot("draft")
-            firstSnapshot.countDown()
-            if (blockAfterFirstSnapshot) releaseFirstSnapshot.await(WAIT_SECONDS, TimeUnit.SECONDS)
+            if (emitDraftBeforeResult) {
+                onTextSnapshot("draft")
+                firstSnapshot.countDown()
+                if (blockAfterFirstSnapshot) releaseFirstSnapshot.await(WAIT_SECONDS, TimeUnit.SECONDS)
+            }
             if (blockUntilStopped) {
                 while (isStillAllowed()) Thread.sleep(POLL_MILLIS)
                 return Result.failure(IllegalStateException("cancelled"))
             }
             generationFailure?.let { return Result.failure(it) }
-            onTextSnapshot("final answer")
+            if (successfulText.isNotEmpty()) onTextSnapshot(successfulText)
             return Result.success(
                 LocalChatGenerationResult(
-                    text = "final answer",
+                    text = successfulText,
                     promptTokens = messages.size * 10,
-                    outputTokens = 3,
+                    outputTokens = if (successfulText.isBlank()) 0 else 3,
                     finishReason = "stop",
                     timeToFirstTokenMs = 14L,
                     prefillTokensPerSecond = 6.0,

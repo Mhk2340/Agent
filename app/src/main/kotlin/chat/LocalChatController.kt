@@ -165,6 +165,9 @@ internal class LocalChatController(
                     }
                     archive = normalizedArchive
                     opened = true
+                    if (loaded != normalizedArchive && isAllowed()) {
+                        persistArchive()
+                    }
                     val activeConversation = normalizedArchive.conversations.firstOrNull {
                         it.id == normalizedArchive.activeConversationId
                     }
@@ -181,14 +184,6 @@ internal class LocalChatController(
                         historyDiagnosticCode = historyFailureCode,
                         historyExceptionClass = historyFailureClass
                     ))
-                    if (loaded != normalizedArchive && isAllowed()) {
-                        persistArchive()
-                        publish(currentState.copy(
-                            isHistoryEphemeral = usingMemoryOnlyHistory,
-                            historyDiagnosticCode = historyFailureCode,
-                            historyExceptionClass = historyFailureClass
-                        ))
-                    }
                 } finally {
                     opening.set(false)
                 }
@@ -538,6 +533,16 @@ internal class LocalChatController(
         metrics: LocalChatMetrics,
         contextTrimmed: Boolean
     ) {
+        if (text.isBlank()) {
+            completeFailure(
+                conversation = conversation,
+                assistantId = assistantId,
+                error = LocalChatError.GENERATION_FAILED,
+                partialText = "",
+                promptTokens = metrics.promptTokens
+            )
+            return
+        }
         val assistant = LocalChatMessage(
             id = assistantId,
             role = LocalChatRole.ASSISTANT,
