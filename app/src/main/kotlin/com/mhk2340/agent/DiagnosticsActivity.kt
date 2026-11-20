@@ -182,18 +182,37 @@ class DiagnosticsActivity : Activity() {
                     true
                 },
                 executeCheck(R.string.diagnostics_check_cipher, DiagnosticsSelfCheck.CIPHER) {
-                    val cipher = AesGcmCipher()
+                    val provider = AndroidKeystoreKeyProvider()
+                    val alias = AesGcmCipher.DEFAULT_DATABASE_KEY_ALIAS
+                    val key = provider.getOrCreateSecretKey(alias)
+                    if (!key.algorithm.equals("AES", ignoreCase = true) || provider.getSecretKey(alias) == null) {
+                        return@executeCheck false
+                    }
+                    val cipher = AesGcmCipher(keyProvider = provider, keyAlias = alias)
+                    val ivLengthBytes = 12
+                    val minimumPayloadBytes = ivLengthBytes + 16 + 1
                     val plain = byteArrayOf(3, 1, 4, 1, 5, 9)
-                    var sealed: ByteArray? = null
+                    var firstSealed: ByteArray? = null
+                    var secondSealed: ByteArray? = null
                     var opened: ByteArray? = null
+                    var firstIv: ByteArray? = null
+                    var secondIv: ByteArray? = null
                     try {
-                        sealed = cipher.encryptBytes(plain)
-                        opened = cipher.decryptBytes(sealed)
-                        opened.contentEquals(plain)
+                        firstSealed = cipher.encryptBytes(plain)
+                        secondSealed = cipher.encryptBytes(plain)
+                        firstIv = firstSealed.copyOfRange(0, ivLengthBytes)
+                        secondIv = secondSealed.copyOfRange(0, ivLengthBytes)
+                        opened = cipher.decryptBytes(firstSealed)
+                        firstSealed.size > minimumPayloadBytes &&
+                            secondSealed.size > minimumPayloadBytes &&
+                            !firstIv.contentEquals(secondIv) && opened.contentEquals(plain)
                     } finally {
                         plain.fill(0)
-                        sealed?.fill(0)
+                        firstSealed?.fill(0)
+                        secondSealed?.fill(0)
                         opened?.fill(0)
+                        firstIv?.fill(0)
+                        secondIv?.fill(0)
                     }
                 },
                 executeCheck(R.string.diagnostics_check_history, DiagnosticsSelfCheck.HISTORY_FILE, ::checkHistoryFile),

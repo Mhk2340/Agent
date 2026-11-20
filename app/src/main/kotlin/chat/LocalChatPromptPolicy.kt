@@ -4,7 +4,7 @@ package chat
 internal object LocalChatPromptPolicy {
     const val MAX_FORMATTED_PROMPT_TOKENS = 256
     const val DEFAULT_SYSTEM_PROMPT =
-        "You are ATOM, a helpful and concise assistant. Use the conversation context to answer the latest user message."
+        "You are ATOM, a helpful and concise assistant. Use the conversation context to answer the latest user message. Reply in the same language as the user. If the user writes in Persian, respond in fluent, natural Persian. Do not reveal internal reasoning; provide only the final answer. /no_think"
 
     sealed class Selection {
         data class Ready(

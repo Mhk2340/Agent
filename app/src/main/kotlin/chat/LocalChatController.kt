@@ -25,7 +25,8 @@ internal data class LocalChatGenerationResult(
     val finishReason: String,
     val timeToFirstTokenMs: Long,
     val prefillTokensPerSecond: Double?,
-    val decodeTokensPerSecond: Double?
+    val decodeTokensPerSecond: Double?,
+    val thinkingTokens: Int = 0
 ) {
     override fun toString(): String =
         "LocalChatGenerationResult(text=<redacted>, promptTokens=$promptTokens, " +
@@ -59,7 +60,8 @@ internal class LocalChatController(
     private val isModelInstalled: () -> Boolean,
     private val diagnostics: DiagnosticsLog? = null,
     private val clock: () -> Long = System::currentTimeMillis,
-    private val newId: () -> String = { UUID.randomUUID().toString() }
+    private val newId: () -> String = { UUID.randomUUID().toString() },
+    private val generationOptionsProvider: () -> LocalChatGenerationOptions = { LocalChatGenerationOptions() }
 ) : Closeable {
     private val stateLock = Any()
     private val persistentHistoryStore = historyStore
@@ -74,6 +76,7 @@ internal class LocalChatController(
     private val pendingTextSnapshot = AtomicReference<String?>(null)
     private val firstStreamSnapshotSeen = AtomicBoolean(false)
     private val activeGenerationStartedNanos = AtomicLong(0L)
+    private val activeGenerationOptions = AtomicReference<LocalChatGenerationOptions?>(null)
 
     @Volatile
     private var currentState = LocalChatUiState()
@@ -303,8 +306,13 @@ internal class LocalChatController(
         if (!current.isGenerating) return false
         val conversation = current.activeConversation ?: return false
         if (conversation.messages.none { it.id == messageId }) return false
+        val parts = LocalChatThinkParser.split(snapshot)
         val updated = conversation.copy(messages = conversation.messages.map { message ->
-            if (message.id == messageId) message.copy(content = snapshot) else message
+            if (message.id == messageId) {
+                message.copy(content = parts.answer, thinkingContent = parts.thinking)
+            } else {
+                message
+            }
         })
         publish(current.copy(activeConversation = updated))
         return true
@@ -326,6 +334,7 @@ internal class LocalChatController(
         pendingTextSnapshot.set(null)
         activeAssistantMessageId.set(null)
         firstStreamSnapshotSeen.set(false)
+        activeGenerationOptions.set(null)
         archive = LocalChatArchive()
         memoryOnlyHistoryStore.clear()
         usingMemoryOnlyHistory = false
@@ -343,6 +352,7 @@ internal class LocalChatController(
         pendingTextSnapshot.set(null)
         activeAssistantMessageId.set(null)
         firstStreamSnapshotSeen.set(false)
+        activeGenerationOptions.set(null)
         archive = LocalChatArchive()
         memoryOnlyHistoryStore.clear()
         usingMemoryOnlyHistory = false
@@ -467,10 +477,13 @@ internal class LocalChatController(
         }
         val ready = selection as? LocalChatPromptPolicy.Selection.Ready ?: return
 
+        val generationOptions = runCatching(generationOptionsProvider)
+            .getOrDefault(LocalChatGenerationOptions())
+        activeGenerationOptions.set(generationOptions)
         val generated = inference.generate(
             systemPrompt = LocalChatPromptPolicy.DEFAULT_SYSTEM_PROMPT,
             messages = ready.messages,
-            options = LocalChatGenerationOptions(),
+            options = generationOptions,
             isStillAllowed = { canContinue(cancellation) },
             onPromptTokenCount = { tokenCount ->
                 if (canContinue(cancellation)) {
@@ -512,7 +525,9 @@ internal class LocalChatController(
                     outputTokens = result.outputTokens,
                     timeToFirstTokenMs = result.timeToFirstTokenMs,
                     prefillTokensPerSecond = result.prefillTokensPerSecond,
-                    decodeTokensPerSecond = result.decodeTokensPerSecond
+                    decodeTokensPerSecond = result.decodeTokensPerSecond,
+                    thinkingTokens = result.thinkingTokens,
+                    finishReason = LocalChatFinishReason.fromNative(result.finishReason)
                 )
                 completeSuccess(conversation, assistantId, result.text, metrics, ready.removedTurns > 0)
             },
@@ -533,12 +548,14 @@ internal class LocalChatController(
         metrics: LocalChatMetrics,
         contextTrimmed: Boolean
     ) {
-        if (text.isBlank()) {
+        val parts = LocalChatThinkParser.split(text)
+        if (parts.answer.isBlank()) {
             completeFailure(
                 conversation = conversation,
                 assistantId = assistantId,
                 error = LocalChatError.GENERATION_FAILED,
                 partialText = "",
+                thinkingText = parts.thinking,
                 promptTokens = metrics.promptTokens
             )
             return
@@ -546,11 +563,12 @@ internal class LocalChatController(
         val assistant = LocalChatMessage(
             id = assistantId,
             role = LocalChatRole.ASSISTANT,
-            content = text,
+            content = parts.answer,
             createdAtEpochMs = clock(),
             status = LocalChatMessageStatus.COMPLETE,
             metrics = metrics,
-            olderContextTrimmed = contextTrimmed
+            olderContextTrimmed = contextTrimmed,
+            thinkingContent = parts.thinking
         )
         recordGenerationOutcome(
             DiagnosticCode.CHAT_SEND_FINISHED,
@@ -560,7 +578,9 @@ internal class LocalChatController(
             firstTokenMs = metrics.timeToFirstTokenMs,
             prefillTokensPerSecond = metrics.prefillTokensPerSecond,
             decodeTokensPerSecond = metrics.decodeTokensPerSecond,
-            phase = currentState.phase
+            phase = currentState.phase,
+            finishReason = metrics.finishReason,
+            thinkingTokenCount = metrics.thinkingTokens
         )
         finish(conversation, assistant, error = null, promptTokens = metrics.promptTokens)
     }
@@ -581,7 +601,8 @@ internal class LocalChatController(
             content = partialText,
             createdAtEpochMs = clock(),
             status = LocalChatMessageStatus.CANCELLED,
-            olderContextTrimmed = removedTurns > 0
+            olderContextTrimmed = removedTurns > 0,
+            thinkingContent = currentStreamingThinking()
         )
         recordGenerationOutcome(
             DiagnosticCode.CHAT_SEND_CANCELLED,
@@ -599,7 +620,8 @@ internal class LocalChatController(
         error: LocalChatError,
         partialText: String,
         promptTokens: Int? = currentState.promptTokenCount,
-        failureCause: Throwable? = null
+        failureCause: Throwable? = null,
+        thinkingText: String = ""
     ) {
         if (!isAllowed()) {
             onAccessLost()
@@ -611,7 +633,8 @@ internal class LocalChatController(
             content = partialText,
             createdAtEpochMs = clock(),
             status = LocalChatMessageStatus.FAILED,
-            olderContextTrimmed = currentState.olderContextTrimmed
+            olderContextTrimmed = currentState.olderContextTrimmed,
+            thinkingContent = thinkingText.ifEmpty { currentStreamingThinking() }
         )
         recordGenerationOutcome(
             DiagnosticCode.CHAT_SEND_FAILED,
@@ -652,6 +675,7 @@ internal class LocalChatController(
         activeAssistantMessageId.set(null)
         pendingTextSnapshot.set(null)
         firstStreamSnapshotSeen.set(false)
+        activeGenerationOptions.set(null)
         val saved = persistArchive()
         val finalError = when {
             !isAllowed() -> LocalChatError.APP_LOCKED
@@ -767,13 +791,29 @@ internal class LocalChatController(
         prefillTokensPerSecond: Double? = null,
         decodeTokensPerSecond: Double? = null,
         phase: LocalChatGenerationPhase? = null,
-        failure: Throwable? = null
+        failure: Throwable? = null,
+        finishReason: LocalChatFinishReason? = null,
+        thinkingTokenCount: Int? = null
     ) {
         val fields = mutableListOf(DiagnosticField.number(DiagnosticFieldKey.DURATION_MS, generationElapsedMs()))
         result?.let { fields += DiagnosticField.enum(DiagnosticFieldKey.RESULT_TYPE, it) }
         promptTokenCount?.let { fields += DiagnosticField.number(DiagnosticFieldKey.PROMPT_TOKEN_COUNT, it.toLong()) }
         outputTokenCount?.let { fields += DiagnosticField.number(DiagnosticFieldKey.OUTPUT_TOKEN_COUNT, it.toLong()) }
         firstTokenMs?.let { fields += DiagnosticField.number(DiagnosticFieldKey.TIME_TO_FIRST_TOKEN_MS, it) }
+        thinkingTokenCount?.let { fields += DiagnosticField.number(DiagnosticFieldKey.THINKING_TOKEN_COUNT, it.toLong()) }
+        finishReason?.let { fields += DiagnosticField.enum(DiagnosticFieldKey.FINISH_REASON, it) }
+        activeGenerationOptions.get()?.let { options ->
+            fields += DiagnosticField.number(DiagnosticFieldKey.OUTPUT_TOKEN_BUDGET, options.maxOutputTokens.toLong())
+            fields += DiagnosticField.number(DiagnosticFieldKey.THINKING_TOKEN_BUDGET, options.thinkingTokenBudget.toLong())
+            fields += DiagnosticField.number(DiagnosticFieldKey.FINAL_ANSWER_TOKEN_BUDGET, options.finalAnswerTokenBudget.toLong())
+            fields += DiagnosticField.decimal(DiagnosticFieldKey.TEMPERATURE, options.temperature.toDouble())
+            fields += DiagnosticField.decimal(DiagnosticFieldKey.TOP_P, options.topP.toDouble())
+            fields += DiagnosticField.number(DiagnosticFieldKey.TOP_K, options.topK.toLong())
+            fields += DiagnosticField.decimal(DiagnosticFieldKey.MIN_P, options.minP.toDouble())
+            fields += DiagnosticField.decimal(DiagnosticFieldKey.REPEAT_PENALTY, options.repeatPenalty.toDouble())
+            fields += DiagnosticField.decimal(DiagnosticFieldKey.PRESENCE_PENALTY, options.presencePenalty.toDouble())
+            fields += DiagnosticField.number(DiagnosticFieldKey.SEED, options.seed.toLong())
+        }
         prefillTokensPerSecond?.takeIf { it.isFinite() }?.let {
             fields += DiagnosticField.decimal(DiagnosticFieldKey.PREFILL_TOKENS_PER_SECOND, it)
         }
@@ -799,11 +839,20 @@ internal class LocalChatController(
 
     private fun currentPartialText(): String {
         flushStreamingText()
-        val assistantId = activeAssistantMessageId.get() ?: return pendingTextSnapshot.get().orEmpty()
+        val assistantId = activeAssistantMessageId.get()
+        val answer = assistantId?.let { id ->
+            currentState.activeConversation?.messages?.firstOrNull { it.id == id }?.content
+        }
+        return answer ?: LocalChatThinkParser.split(pendingTextSnapshot.get().orEmpty()).answer
+    }
+
+    private fun currentStreamingThinking(): String {
+        flushStreamingText()
+        val assistantId = activeAssistantMessageId.get() ?: return ""
         return currentState.activeConversation?.messages
             ?.firstOrNull { it.id == assistantId }
-            ?.content
-            ?: pendingTextSnapshot.get().orEmpty()
+            ?.thinkingContent
+            ?: ""
     }
 
     private fun mapError(error: Throwable?): LocalChatError {

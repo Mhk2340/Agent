@@ -3,7 +3,6 @@ package memory
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import java.security.KeyStore
-import java.security.SecureRandom
 import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -117,9 +116,9 @@ class AesGcmCipher(
 
     fun encryptBytes(plainBytes: ByteArray): ByteArray {
         val cipher = Cipher.getInstance(TRANSFORMATION)
-        val iv = ByteArray(IV_LENGTH_BYTES)
-        SecureRandom().nextBytes(iv)
-        cipher.init(Cipher.ENCRYPT_MODE, keyProvider.getOrCreateSecretKey(keyAlias), GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
+        cipher.init(Cipher.ENCRYPT_MODE, keyProvider.getOrCreateSecretKey(keyAlias))
+        val iv = requireNotNull(cipher.iv) { "The AES-GCM provider did not supply an IV" }
+        require(iv.size == IV_LENGTH_BYTES) { "The AES-GCM provider supplied an unexpected IV length" }
         val encrypted = cipher.doFinal(plainBytes)
         return ByteArray(iv.size + encrypted.size).also { combined ->
             System.arraycopy(iv, 0, combined, 0, iv.size)

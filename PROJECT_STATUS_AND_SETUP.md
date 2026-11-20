@@ -4,7 +4,7 @@
 > **مرجع نقشه‌راه:** `MASTER-ROADMAP-v4-FINAL.md` در workspace فعلی موجود نیست؛ مواردی که بدون آن قابل اثبات نیستند با برچسب «اثبات‌نشده»/باز نگه داشته می‌شوند.
 > **وضعیت Git جاری:** شاخه‌ی فعلی `checkpoint/phases-a-to-e` و `HEAD=01773bb642583072b2c46204fc52aca94cdf249d` است. شاخه/commit هدف `checkpoint/phases-a-to-f`/`3fae3a3` در refs یا object database این clone نیست؛ bundle کامل `/home/user/Agent-all-branches-2026-10-13.bundle` نیز فقط refs هم‌ارز با `01773bb` را دارد. تغییرهای قبلی A–F همچنان stage‌شده‌اند؛ تغییرهای G و H در working tree به‌صورت unstaged/untracked/modified باقی‌اند. در این نوبت هیچ branch، index، commit، push یا Git config تغییر نکرده است؛ تغییرهای جدید stage نشده‌اند و commit تا تعیین base معتبر انجام نمی‌شود.
 > **وضعیت Phase G:** GEN-SEC-2، GEN-SEC-3، GEN-579/580 و GEN-EDGE-1 را کامل نمی‌خوانیم؛ پیاده‌سازی/آزمون JVM فاز G انجام شده، اما تأیید روی دستگاه و Android Keystore واقعی باز است. Panic Reset از UI محافظت‌شده درخواست می‌شود؛ منطق موجود reset در این turn تغییر نکرده است.
-> **آخرین verification کامل:** پس از Phase H، `:app:testDebugUnitTest` = ۱۵۶ تست، `:safety:test` = ۱۷؛ مجموع ۱۷۳، صفر failure/error/skipped. نسبت به baseline پیش از H (app=۱۴۸, safety=۱۷)، هشت JVM test جدید افزوده شده است؛ هیچ تستی حذف یا disabled نشده است. `localVerify` موفق: ۴۴ actionable tasks (۷ اجرا، ۳۷ up-to-date). `:app:verifySafetyIntegrity --rerun-tasks` جداگانه موفق (۱ task). `:app:lintDebug --rerun-tasks` موفق: ۳۳/۳۳ task، ۰ error، ۱۲ warning. گزارش شمارش JUnit `native/verify-jvm-test-counts.py` نیز با همین XMLها موفق شد. جزئیات و محدودیت‌های Phase H در بخش انتهایی آمده‌اند.
+> **آخرین verification کامل (۲۰ نوامبر ۲۰۲۶؛ جایگزین نتیجه‌ی ۱۶ اکتبر):** پس از اصلاح H6/Qwen3 (thinking + sampling + AES-GCM), `:app:testDebugUnitTest` = ۲۲۴ تست، `:safety:test` = ۱۷؛ مجموع ۲۴۱، صفر failure/error/skipped. نسبت به app=216 تأیید قبلیِ H6، هشت تست جدید (LocalChatGenerationOptionsTest=۳ و LocalChatThinkParserTest=۵) افزوده شد؛ هیچ تستی حذف یا disabled نشده است. `localVerify` موفق: ۴۴ actionable tasks (۱۶ اجرا، ۲۸ up-to-date)؛ `:app:lintDebug` و `:app:verifySafetyIntegrity` در آن اجرا شدند و صفر error تولید کردند. گزارش شمارش JUnit `native/verify-jvm-test-counts.py` موفق شد (app=224 ≥ ۲۰۶؛ safety=17). تلاش نخست این turn به OOM سراسری کرنل در daemon خورد؛ با metaspace=512m، SerialGC و `--max-workers=1` موفق شد. جزئیات و محدودیت‌های این اصلاح در بخش انتهایی «پیوست ۲» آمده‌اند. نتیجه‌ی ۱۶ اکتبر (app=۱۵۶، safety=۱۷) تاریخی و superseded است.
 > **Device/native verification:** JUnit/Robolectric/JVM شواهد device verification نیستند. Instrumented Android tests، اجرای llama.cpp/JNI، import واقعی GGUF، inference روی گوشی و benchmark دستگاه اجرا نشده‌اند. Native build و APK packaging فقط در GitHub Actions تعریف شده‌اند؛ workflow این clone اجرا نشده، remote در Git تنظیم نیست و `.so`/APK تولید یا upload نشده‌اند.
 
 ---
@@ -482,3 +482,35 @@ EOF
 - **باقی‌مانده‌ی صریح:** CMake/JNI هنوز compile نشده، GitHub Actions اجرا نشده، GGUF واقعی از SAF وارد نشده و هیچ گوشی/Android runtime آزموده نشده است. شواهد فعلی فقط Kotlin/JVM + XML/resource/lint verification هستند؛ device/native validation همچنان باز است. یک اجرای مجدد full verification پس از ویرایش متن resourceهای UI و تغییر نام یکی از test methodها با OOM/daemon disappearance خاتمه یافت؛ اجرای بعدی `localVerify` با محدودیت حافظه‌ی تنظیم‌شده موفق شد و XML نهایی همان ۱۵۶/۱۷، صفر failure/error/skipped را دارد.
 
 *پایان مستند وضعیت پروژه و راه‌اندازی.*
+
+---
+
+## پیوست ۲ — اصلاح H6: Qwen3 thinking، sampling و AES-GCM (۲۰ نوامبر ۲۰۲۶)
+
+**وضعیت:** پیاده‌سازی و آزمون JVM/Lint انجام و `localVerify` موفق شد؛ تبدیل JNI و اجرای واقعی Qwen3 روی دستگاه انجام *نشده* و فقط در GitHub Actions (`native/build-android-cpu.sh` + NDK pinned) انجام می‌شود. تأیید device همچنان باز است.
+
+### تغییرات
+
+- **تفکیک thinking از پاسخ:** فایل جدید `chat/LocalChatThinkParser.kt` همه‌ی snapshotهای تجمعی و متن نهایی را پردازش می‌کند؛ پاسخ کاربر همیشه فاقد `<think>`/`</think>` است و محتوای thinking در `LocalChatMessage.thinkingContent` (سریالایزشده و رمز‌شده همراه تاریخچه) و در `LocalChatMetrics.thinkingTokens` (شمارش دقیق native از قطعات token، شامل نشانگرها) نگه‌داری می‌شود. `toString` پیام همچنان محتواها را redact می‌کند.
+- **سیستم‌پرامپت چت:** دستور صریح پاسخ هم‌زبان + فارسی روان برای کاربر فارسی‌زبان + عدم افشای reasoning + `/no_think` (سوئیچ نرم رسمی Qwen3). هیچ flag Jinjaای به `llama_chat_apply_template` اضافه نشد؛ تابع بومی فقط templates داخلی را پشتیبانی می‌کند.
+- **متریک‌ها و finish reason:** `LocalChatFinishReason` (EOS/OUTPUT_LIMIT/CANCELLED/ERROR/UNKNOWN) با `fromNative` (stop/eos/end_of_turn→EOS، max_tokens/length→OUTPUT_LIMIT). `LocalChatMetrics` اکنون `finishReason` و `thinkingTokens` دارد (سازگار با داده‌های قدیمی، پیش‌فرض UNKNOWN/۰).
+- **Sampling پیش‌فرض (راهنمای non-thinking کارت رسمی Qwen3-4B-GGUF):** temperature=0.7، top_p=0.8، top_k=20، min_p=0، repeat_penalty=1.0، presence_penalty=1.5، seed=-1 (یعنی `LLAMA_DEFAULT_SEED` = مقداردهی تصادفی). زنجیره‌ی JNI: penalties (repeat/presence، پنجره‌ی ۶۴ توکن) → top-k (اگر >۰) → top-p → min-p (اگر >۰) → temperature → dist. مسیر greedy (temperature=0) دست‌نخورده ماند. seed منفی = تصادفی؛ سایر مقادیر به‌عنوان `uint32_t` cast می‌شوند. اسناد کارت مدل presence_penalty را نسبت به repeat_penalty ترجیح می‌دهند؛ repeat_penalty در کد برای سازگاری کامل نگه داشته شده ولی پیش‌فرض ۱.۰ (غیرفعال) است.
+- **بودجه‌ها:** `LocalChatGenerationOptions` اکنون `thinkingTokenBudget=128` و `finalAnswerTokenBudget=512` و رزرو ۲ توکن برای نشانگرهاست؛ `maxOutputTokens` مشتق = ۶۴۲ (پیش‌فرض)، سقف سخت ≤ ۱۰۲۴. `thinkingTokenBudget` یک رزرو حسابداری است، *نه* توقف سخت در native؛ توقف سخت همان `maxOutputTokens` است. `LocalChatGenerationSettingsStore` (SharedPreferences خصوصی، فقط کلیدهای عددی sampling؛ بودجه‌ها توسط اپ مدیریت می‌شوند) ساخته شد و از طریق `AgentContainer` به `LocalChatController` تزریق می‌شود؛ **هیچ UI ویرایشگری برای sampling هنوز وجود ندارد**، بنابراین اکنون همیشه مقادیر پیش‌فرض بارگذاری می‌شوند.
+- **عیب‌یابی:** `DiagnosticFieldKey`های جدید (`THINKING_TOKEN_COUNT`, `OUTPUT_TOKEN_BUDGET`, `THINKING_TOKEN_BUDGET`, `FINAL_ANSWER_TOKEN_BUDGET`, `FINISH_REASON`, `TEMPERATURE`, `TOP_P`, `TOP_K`, `MIN_P`, `REPEAT_PENALTY`, `PRESENCE_PENALTY`, `SEED`) فقط اعداد/enum هستند و در `CHAT_SEND_FINISHED` ثبت می‌شوند؛ محتوای پیام هرگز ثبت نمی‌شود.
+- **رمزنگاری:** `SecurityCipher.encryptBytes` اکنون IV را از `cipher.iv` (تولیدشده توسط Keystore؛ `cipher.init` بدون `GCMParameterSpec`) می‌خواند و آن را پیشوندی به ciphertext می‌کند؛ `GCMParameterSpec` فقط در decrypt استفاده می‌شود. خودآزمایی AES-GCM در `DiagnosticsActivity` اکنون alias واقعی Keystore، الگوریتم کلید، دو payload جدا با IV متفاوت و حداقل اندازه‌ی payload را بررسی می‌کند.
+- **نسخه:** `versionCode=9` و `versionName="1.8"`.
+
+### اعتبارسنجی واقعی
+
+- `:app:compileDebugKotlin` موفق (فقط warningهای از پیش موجود).
+- `:app:testDebugUnitTest` = ۲۲۴ تست (شامل ۸ تست جدید؛ LocalChatControllerTest بدون تغییر رفتار)، `:safety:test` = ۱۷؛ `localVerify` = BUILD SUCCESSFUL، ۴۴ task (۱۶ اجرا/۲۸ به‌روز)، `:app:lintDebug` و `:app:verifySafetyIntegrity` اجرا و بدون error.
+- `python native/verify-jvm-test-counts.py`: app=224 ≥ 206، safety=17، failure/error/skipped=0.
+- شکست اولیه‌ی این turn: Gradle daemon با `global_oom` کرنل (RSS ~۵۱۴MB) در حین/بلافاصله پس از `compileDebugUnitTestKotlin` کشته شد؛ retry با metaspace=512m و `-XX:+UseSerialGC` و `--max-workers=1` موفق شد. باکس ۲ هسته‌ای/۲GiB است.
+
+### محدودیت‌ها و کارهای باز
+
+- فایل JNI (`native/llama_jni.cpp`) در این sandbox کامپایل و اجرا نشده است؛ سینتکس/ABI آن فقط در CI (`phase-h-android-cpu.yml`) راستی‌آزمایی می‌شود. تغییرات native: پارامترهای `topK/minP/repeatPenalty/presencePenalty/seed` در `nativeGenerateConversation`، زنجیره‌ی sampler، شمارش thinking tokens، و `unparse_special=true` در detokenize مسیر چت (تا نشانگرها در snapshot/متن نهایی قابل پارس باشند؛ سپس Kotlin آن‌ها را حذف می‌کند).
+- تأیید device/Keystore واقعی، import مدل GGUF واقعی و اجرای inference Qwen3 همچنان باز است.
+- `thinkingTokenBudget` در native enforcement نمی‌شود (توقف سخت امکان‌پذیر نیست بدون template support)؛ اگر مدل از `/no_think` پیروی کند، اصلاً thinking emit نمی‌شود.
+- آرشیوهای تاریخچه‌ی قدیمی که «غیرعمدی» شامل متن `<think>` در `content` ذخیره شده‌اند به‌صورت خودکار migrate نمی‌شوند؛ پیام‌های جدید پاک‌اند.
+- هیچ UI برای ویرایش sampling وجود ندارد؛ `LocalChatGenerationSettingsStore.save` در حال حاضر بدون فراخوانده است.

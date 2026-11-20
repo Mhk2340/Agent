@@ -29,6 +29,11 @@ internal class DispatcherLocalChatInference(
         maxTokens = options.maxOutputTokens,
         temperature = options.temperature,
         topP = options.topP,
+        topK = options.topK,
+        minP = options.minP,
+        repeatPenalty = options.repeatPenalty,
+        presencePenalty = options.presencePenalty,
+        seed = options.seed,
         isStillAllowed = isStillAllowed,
         onPromptTokenCount = onPromptTokenCount,
         onTextSnapshot = onTextSnapshot
@@ -42,7 +47,8 @@ internal class DispatcherLocalChatInference(
             finishReason = measured.response.finish_reason,
             timeToFirstTokenMs = measurements.firstTokenTimeMs,
             prefillTokensPerSecond = measurements.prefillTokensPerSecond,
-            decodeTokensPerSecond = measurements.decodeTokensPerSecond
+            decodeTokensPerSecond = measurements.decodeTokensPerSecond,
+            thinkingTokens = measurements.thinkingTokens
         )
     }
 

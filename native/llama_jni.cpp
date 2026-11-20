@@ -402,7 +402,7 @@ std::vector<llama_token> tokenizePrompt(const llama_vocab * vocab, const std::st
     return tokens;
 }
 
-std::string detokenize(const llama_vocab * vocab, const std::vector<llama_token> & tokens) {
+std::string detokenize(const llama_vocab * vocab, const std::vector<llama_token> & tokens, bool unparseSpecial = false) {
     if (tokens.empty()) {
         return {};
     }
@@ -413,7 +413,7 @@ std::string detokenize(const llama_vocab * vocab, const std::vector<llama_token>
         nullptr,
         int32_t{},
         true,
-        false
+        unparseSpecial
     );
     if (required == std::numeric_limits<int32_t>::min()) {
         throw std::runtime_error("Generated text is too large to detokenize");
@@ -427,7 +427,7 @@ std::string detokenize(const llama_vocab * vocab, const std::vector<llama_token>
         buffer.data(),
         capacity,
         true,
-        false
+        unparseSpecial
     );
     if (actual < 0 || actual > capacity) {
         throw std::runtime_error("Could not detokenize the generated response");
@@ -435,11 +435,20 @@ std::string detokenize(const llama_vocab * vocab, const std::vector<llama_token>
     return std::string(buffer.data(), static_cast<size_t>(actual));
 }
 
+std::string detokenizeOnePiece(const llama_vocab * vocab, llama_token token) noexcept {
+    try {
+        return detokenize(vocab, std::vector<llama_token>{token}, true);
+    } catch (...) {
+        return {};
+    }
+}
+
 jobject makeGenerationResult(
     JNIEnv * env,
     const std::string & text,
     jint promptTokens,
     jint completionTokens,
+    jint thinkingTokens,
     const std::string & finishReason,
     jlong prefillElapsedNanos,
     jlong firstTokenElapsedNanos,
@@ -452,7 +461,7 @@ jobject makeGenerationResult(
     const jmethodID constructor = env->GetMethodID(
         resultClass,
         "<init>",
-        "(Ljava/lang/String;IILjava/lang/String;JJJ)V"
+        "(Ljava/lang/String;IIILjava/lang/String;JJJ)V"
     );
     if (constructor == nullptr) {
         env->DeleteLocalRef(resultClass);
@@ -474,6 +483,7 @@ jobject makeGenerationResult(
         javaText,
         promptTokens,
         completionTokens,
+        thinkingTokens,
         javaFinishReason,
         prefillElapsedNanos,
         firstTokenElapsedNanos,
@@ -855,6 +865,7 @@ Java_inference_JniLlamaBridge_nativeGenerate(
             outputText,
             static_cast<jint>(promptTokens.size()),
             static_cast<jint>(outputTokens.size()),
+            jint{0},
             finishReason,
             prefillElapsedNanos,
             firstTokenElapsedNanos,
@@ -880,6 +891,11 @@ Java_inference_JniLlamaBridge_nativeGenerateConversation(
     jint maxTokens,
     jfloat temperature,
     jfloat topP,
+    jint topK,
+    jfloat minP,
+    jfloat repeatPenalty,
+    jfloat presencePenalty,
+    jint seed,
     jobject callback
 ) {
     try {
@@ -888,7 +904,10 @@ Java_inference_JniLlamaBridge_nativeGenerateConversation(
             throw std::invalid_argument("The native model handle is invalid");
         }
         if (maxTokens <= 0 || !std::isfinite(temperature) || temperature < 0.0f ||
-            !std::isfinite(topP) || topP <= 0.0f || topP > 1.0f) {
+            !std::isfinite(topP) || topP <= 0.0f || topP > 1.0f ||
+            topK < 0 || !std::isfinite(minP) || minP < 0.0f || minP > 1.0f ||
+            !std::isfinite(repeatPenalty) || repeatPenalty <= 0.0f ||
+            !std::isfinite(presencePenalty) || seed < -1) {
             throw std::invalid_argument("Chat generation parameters are invalid");
         }
         if (callback == nullptr) {
@@ -974,7 +993,10 @@ Java_inference_JniLlamaBridge_nativeGenerateConversation(
             env->DeleteLocalRef(callbackClass);
             throw std::bad_alloc();
         }
-        constexpr size_t kTopPMinKeep = 1;
+        constexpr size_t kMinKeep = 1;
+        // Matches llama.cpp's repeat-penalty history window; applied before truncation/temperature.
+        constexpr int32_t kPenaltyLastN = 64;
+        const uint32_t seedValue = seed < 0 ? LLAMA_DEFAULT_SEED : static_cast<uint32_t>(seed);
         if (temperature <= 0.0f) {
             llama_sampler * greedySampler = llama_sampler_init_greedy();
             if (greedySampler == nullptr) {
@@ -983,17 +1005,41 @@ Java_inference_JniLlamaBridge_nativeGenerateConversation(
             }
             llama_sampler_chain_add(sampler.get(), greedySampler);
         } else {
-            llama_sampler * topPSampler = llama_sampler_init_top_p(topP, kTopPMinKeep);
+            const bool penaltiesEnabled = repeatPenalty != 1.0f || presencePenalty != 0.0f;
+            const bool topKEnabled = topK > 0;
+            const bool minPEnabled = minP > 0.0f;
+            // Create every sampler before adding any to the chain so a mid-build allocation
+            // failure can free the pending ones; once added, the chain owns them.
+            llama_sampler * penaltiesSampler = penaltiesEnabled
+                ? llama_sampler_init_penalties(
+                    llama_vocab_n_tokens(vocab), kPenaltyLastN, repeatPenalty, 0.0f, presencePenalty)
+                : nullptr;
+            llama_sampler * topKSampler = topKEnabled ? llama_sampler_init_top_k(topK) : nullptr;
+            llama_sampler * topPSampler = llama_sampler_init_top_p(topP, kMinKeep);
+            llama_sampler * minPSampler = minPEnabled ? llama_sampler_init_min_p(minP, kMinKeep) : nullptr;
             llama_sampler * temperatureSampler = llama_sampler_init_temp(temperature);
-            llama_sampler * distributionSampler = llama_sampler_init_dist(LLAMA_DEFAULT_SEED);
-            if (topPSampler == nullptr || temperatureSampler == nullptr || distributionSampler == nullptr) {
+            llama_sampler * distributionSampler = llama_sampler_init_dist(seedValue);
+            const bool allocationFailed =
+                (penaltiesEnabled && penaltiesSampler == nullptr) ||
+                (topKEnabled && topKSampler == nullptr) ||
+                topPSampler == nullptr ||
+                (minPEnabled && minPSampler == nullptr) ||
+                temperatureSampler == nullptr ||
+                distributionSampler == nullptr;
+            if (allocationFailed) {
+                if (penaltiesSampler != nullptr) llama_sampler_free(penaltiesSampler);
+                if (topKSampler != nullptr) llama_sampler_free(topKSampler);
                 if (topPSampler != nullptr) llama_sampler_free(topPSampler);
+                if (minPSampler != nullptr) llama_sampler_free(minPSampler);
                 if (temperatureSampler != nullptr) llama_sampler_free(temperatureSampler);
                 if (distributionSampler != nullptr) llama_sampler_free(distributionSampler);
                 env->DeleteLocalRef(callbackClass);
                 throw std::bad_alloc();
             }
+            if (penaltiesSampler != nullptr) llama_sampler_chain_add(sampler.get(), penaltiesSampler);
+            if (topKSampler != nullptr) llama_sampler_chain_add(sampler.get(), topKSampler);
             llama_sampler_chain_add(sampler.get(), topPSampler);
+            if (minPSampler != nullptr) llama_sampler_chain_add(sampler.get(), minPSampler);
             llama_sampler_chain_add(sampler.get(), temperatureSampler);
             llama_sampler_chain_add(sampler.get(), distributionSampler);
         }
@@ -1004,6 +1050,8 @@ Java_inference_JniLlamaBridge_nativeGenerateConversation(
         jlong firstTokenElapsedNanos{};
         jlong decodeElapsedNanos{};
         bool firstTokenRecorded = false;
+        bool insideThinkBlock = false;
+        int32_t thinkingTokens = 0;
         auto lastStreamSnapshot = std::chrono::steady_clock::now();
         for (jint produced = 0; produced < maxTokens; ++produced) {
             if (session->abortRequested.load(std::memory_order_relaxed)) {
@@ -1025,12 +1073,25 @@ Java_inference_JniLlamaBridge_nativeGenerateConversation(
                 decodeElapsedNanos = tokenElapsedNanos - firstTokenElapsedNanos;
             }
             outputTokens.push_back(token);
+            // Account for tokens inside a visible Qwen3 think span. Special think markers render
+            // as literal "<think>"/"</think>" pieces once unparseSpecial is enabled for this path.
+            const std::string piece = detokenizeOnePiece(vocab, token);
+            if (!insideThinkBlock && piece.find("<think>") != std::string::npos) {
+                insideThinkBlock = true;
+            }
+            if (insideThinkBlock) {
+                thinkingTokens += 1;
+            }
+            if (insideThinkBlock && piece.find("</think>") != std::string::npos &&
+                piece.find("<think>") == std::string::npos) {
+                insideThinkBlock = false;
+            }
             const auto now = std::chrono::steady_clock::now();
             const bool firstOutput = outputTokens.size() == 1;
             const bool streamIntervalElapsed = now - lastStreamSnapshot >= std::chrono::milliseconds(40);
             const bool outputLimitReached = produced + 1 >= maxTokens;
             if (firstOutput || streamIntervalElapsed || outputLimitReached) {
-                const std::string snapshot = detokenize(vocab, outputTokens);
+                const std::string snapshot = detokenize(vocab, outputTokens, true);
                 jstring javaSnapshot = toJavaString(env, snapshot);
                 if (javaSnapshot == nullptr) {
                     env->DeleteLocalRef(callbackClass);
@@ -1050,7 +1111,7 @@ Java_inference_JniLlamaBridge_nativeGenerateConversation(
             }
         }
 
-        const std::string outputText = detokenize(vocab, outputTokens);
+        const std::string outputText = detokenize(vocab, outputTokens, true);
         if (!outputTokens.empty()) {
             jstring javaSnapshot = toJavaString(env, outputText);
             if (javaSnapshot == nullptr) {
@@ -1070,6 +1131,7 @@ Java_inference_JniLlamaBridge_nativeGenerateConversation(
             outputText,
             static_cast<jint>(promptTokens.size()),
             static_cast<jint>(outputTokens.size()),
+            static_cast<jint>(thinkingTokens),
             finishReason,
             prefillElapsedNanos,
             firstTokenElapsedNanos,

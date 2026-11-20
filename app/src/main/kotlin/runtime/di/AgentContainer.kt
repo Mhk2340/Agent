@@ -4,6 +4,8 @@ import android.content.Context
 import chat.DispatcherLocalChatInference
 import chat.EncryptedLocalChatHistoryStore
 import chat.LocalChatController
+import chat.LocalChatGenerationOptions
+import chat.LocalChatGenerationSettingsStore
 import chat.LocalChatPayloadCipher
 import diagnostics.DiagnosticsLog
 import inference.AndroidContinuousDeviceIdleGate
@@ -194,13 +196,22 @@ class AgentContainer(
     }
     internal val localChatHistoryStore get() = localChatHistoryStoreLazy.value
 
+    private val localChatGenerationSettingsStore: LocalChatGenerationSettingsStore? by lazy {
+        applicationContext?.let { LocalChatGenerationSettingsStore(it) }
+    }
+
     private val localChatControllerLazy = lazy {
         LocalChatController(
             historyStore = localChatHistoryStore,
             inference = DispatcherLocalChatInference(localCpuInferenceDispatcher),
             isAccessAllowed = ::isLocalInferenceAllowed,
             diagnostics = diagnostics,
-            isModelInstalled = { localModelAssetStore.isInstalled() }
+            isModelInstalled = { localModelAssetStore.isInstalled() },
+            generationOptionsProvider = {
+                runCatching { localChatGenerationSettingsStore?.load() }
+                    .getOrNull()
+                    ?: LocalChatGenerationOptions()
+            }
         )
     }
     internal val localChatController: LocalChatController get() = localChatControllerLazy.value

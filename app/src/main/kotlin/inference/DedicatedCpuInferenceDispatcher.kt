@@ -106,6 +106,11 @@ internal class DedicatedCpuInferenceDispatcher(
         maxTokens: Int,
         temperature: Float,
         topP: Float,
+        topK: Int = LlamaNativeBridge.DEFAULT_TOP_K,
+        minP: Float = LlamaNativeBridge.DEFAULT_MIN_P,
+        repeatPenalty: Float = LlamaNativeBridge.DEFAULT_REPEAT_PENALTY,
+        presencePenalty: Float = LlamaNativeBridge.DEFAULT_PRESENCE_PENALTY,
+        seed: Int = LlamaNativeBridge.DEFAULT_SEED,
         isStillAllowed: () -> Boolean = { true },
         onPromptTokenCount: (Int) -> Unit = {},
         onTextSnapshot: (String) -> Unit
@@ -116,6 +121,11 @@ internal class DedicatedCpuInferenceDispatcher(
             maxTokens = maxTokens,
             temperature = temperature,
             topP = topP,
+            topK = topK,
+            minP = minP,
+            repeatPenalty = repeatPenalty,
+            presencePenalty = presencePenalty,
+            seed = seed,
             isStillAllowed = isStillAllowed,
             onPromptTokenCount = onPromptTokenCount,
             onTextSnapshot = onTextSnapshot

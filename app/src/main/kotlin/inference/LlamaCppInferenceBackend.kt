@@ -26,7 +26,9 @@ internal data class NativeGenerationResult(
     val finishReason: String,
     val prefillElapsedNanos: Long,
     val firstTokenElapsedNanos: Long,
-    val decodeElapsedNanos: Long
+    val decodeElapsedNanos: Long,
+    /** Tokens emitted inside a visible <think>...</think> span, including the markers when present. */
+    val thinkingTokens: Int = 0
 )
 
 internal data class NativeChatMessage(val role: String, val content: String) {
@@ -44,7 +46,9 @@ internal data class LlamaRuntimeMeasurements(
     val firstTokenTimeMs: Long,
     val prefillTokensPerSecond: Double?,
     val decodeTokensPerSecond: Double?,
-    val tokenCount: Int
+    val tokenCount: Int,
+    /** Tokens emitted inside a visible <think>...</think> span, including the markers when present. */
+    val thinkingTokens: Int = 0
 )
 
 internal data class MeasuredLlamaInference(
@@ -84,7 +88,12 @@ internal interface LlamaNativeBridge {
         maxTokens: Int,
         temperature: Float,
         topP: Float,
-        callback: NativeChatCallback?
+        topK: Int = DEFAULT_TOP_K,
+        minP: Float = DEFAULT_MIN_P,
+        repeatPenalty: Float = DEFAULT_REPEAT_PENALTY,
+        presencePenalty: Float = DEFAULT_PRESENCE_PENALTY,
+        seed: Int = DEFAULT_SEED,
+        callback: NativeChatCallback? = null
     ): NativeGenerationResult {
         val prompt = flattenConversation(messages)
         val result = generate(handle, systemPrompt, prompt, maxTokens, temperature, topP, null)
@@ -103,6 +112,15 @@ internal interface LlamaNativeBridge {
 
     /** Applies affinity to the calling Linux thread; the caller must read it back separately. */
     fun setThreadAffinity(cpuIds: IntArray): Boolean = false
+
+    companion object {
+        /** Neutral defaults mirroring the ATOM local-chat Qwen3 non-thinking guidance. */
+        const val DEFAULT_TOP_K = 20
+        const val DEFAULT_MIN_P = 0f
+        const val DEFAULT_REPEAT_PENALTY = 1f
+        const val DEFAULT_PRESENCE_PENALTY = 1.5f
+        const val DEFAULT_SEED = -1
+    }
 }
 
 /** JNI declarations are resolved only when the app actually requests local inference. */
@@ -162,6 +180,11 @@ internal object JniLlamaBridge : LlamaNativeBridge {
         maxTokens: Int,
         temperature: Float,
         topP: Float,
+        topK: Int,
+        minP: Float,
+        repeatPenalty: Float,
+        presencePenalty: Float,
+        seed: Int,
         callback: NativeChatCallback?
     ): NativeGenerationResult {
         requireLibrary()
@@ -172,6 +195,11 @@ internal object JniLlamaBridge : LlamaNativeBridge {
             maxTokens,
             temperature,
             topP,
+            topK,
+            minP,
+            repeatPenalty,
+            presencePenalty,
+            seed,
             callback
         )
     }
@@ -233,6 +261,11 @@ internal object JniLlamaBridge : LlamaNativeBridge {
         maxTokens: Int,
         temperature: Float,
         topP: Float,
+        topK: Int,
+        minP: Float,
+        repeatPenalty: Float,
+        presencePenalty: Float,
+        seed: Int,
         callback: NativeChatCallback?
     ): NativeGenerationResult
     private external fun nativeReleaseModel(handle: Long)
@@ -265,6 +298,9 @@ class LlamaCppInferenceBackend internal constructor(
     private var nativeHandle: Long = INVALID_NATIVE_HANDLE
 
     private companion object {
+        /** Mirrors the chat-layer cap; larger top-k defeats the purpose of truncation sampling. */
+        private const val MAX_SAMPLING_TOP_K = 1000
+
         // PROVISIONAL - pending GEN-PERF-1
         const val INVALID_NATIVE_HANDLE = 0L
         // PROVISIONAL - pending GEN-PERF-1
@@ -373,7 +409,8 @@ class LlamaCppInferenceBackend internal constructor(
                         firstTokenTimeMs = TimeUnit.NANOSECONDS.toMillis(nativeResult.firstTokenElapsedNanos),
                         prefillTokensPerSecond = prefillRate,
                         decodeTokensPerSecond = decodeRate,
-                        tokenCount = nativeResult.completionTokens
+                        tokenCount = nativeResult.completionTokens,
+                        thinkingTokens = nativeResult.thinkingTokens.coerceAtLeast(0)
                     )
                 )
             )
@@ -454,6 +491,11 @@ class LlamaCppInferenceBackend internal constructor(
         maxTokens: Int,
         temperature: Float,
         topP: Float,
+        topK: Int = LlamaNativeBridge.DEFAULT_TOP_K,
+        minP: Float = LlamaNativeBridge.DEFAULT_MIN_P,
+        repeatPenalty: Float = LlamaNativeBridge.DEFAULT_REPEAT_PENALTY,
+        presencePenalty: Float = LlamaNativeBridge.DEFAULT_PRESENCE_PENALTY,
+        seed: Int = LlamaNativeBridge.DEFAULT_SEED,
         isStillAllowed: () -> Boolean = { true },
         onPromptTokenCount: (Int) -> Unit = {},
         onTextSnapshot: (String) -> Unit
@@ -464,7 +506,11 @@ class LlamaCppInferenceBackend internal constructor(
         if (maxTokens <= 0 || maxTokens > contextTokens) {
             return failure(InferenceError.ResourceExhausted("Requested output budget is outside the configured context window"))
         }
-        if (!temperature.isFinite() || temperature < 0f || !topP.isFinite() || topP <= 0f || topP > 1f) {
+        if (!temperature.isFinite() || temperature < 0f || !topP.isFinite() || topP <= 0f || topP > 1f ||
+            topK !in 0..MAX_SAMPLING_TOP_K || !minP.isFinite() || minP < 0f || minP > 1f ||
+            !repeatPenalty.isFinite() || repeatPenalty <= 0f || !presencePenalty.isFinite() ||
+            seed < LlamaNativeBridge.DEFAULT_SEED
+        ) {
             return failure(InferenceError.Malformed("Sampling parameters are invalid"))
         }
         val modelFile = modelAssetStore.verifiedModelFile()
@@ -486,6 +532,11 @@ class LlamaCppInferenceBackend internal constructor(
                     maxTokens = maxTokens,
                     temperature = temperature,
                     topP = topP,
+                    topK = topK,
+                    minP = minP,
+                    repeatPenalty = repeatPenalty,
+                    presencePenalty = presencePenalty,
+                    seed = seed,
                     callback = object : NativeChatCallback {
                         override fun onPromptTokenCount(tokenCount: Int) {
                             if (isStillAllowedSafely(isStillAllowed) && tokenCount > 0) {
@@ -538,7 +589,8 @@ class LlamaCppInferenceBackend internal constructor(
                         firstTokenTimeMs = TimeUnit.NANOSECONDS.toMillis(nativeResult.firstTokenElapsedNanos),
                         prefillTokensPerSecond = prefillRate,
                         decodeTokensPerSecond = decodeRate,
-                        tokenCount = nativeResult.completionTokens
+                        tokenCount = nativeResult.completionTokens,
+                        thinkingTokens = nativeResult.thinkingTokens.coerceAtLeast(0)
                     )
                 )
             )
